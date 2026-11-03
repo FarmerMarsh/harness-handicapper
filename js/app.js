@@ -1,6 +1,6 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
 import { parseProgram, fmtTime } from './parse.js';
-import { scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ } from './engine.js';
+import { scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS } from './engine.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -11,12 +11,13 @@ const LS = {
 };
 const CARDS_KEY = 'hh:cards';        // { key: { track, date, savedAt, card } }
 const stateKey = (k) => 'hh:state:' + k; // { scratches, notes, results, snaps }
-const WEIGHTS_KEY = 'hh:weights';
+const MULT_KEY = 'hh:mult';
 const PREF_KEY = 'hh:prefs';
 
 const S = {
   key: null, base: null, card: null, st: null,
-  weights: { ...DEFAULT_WEIGHTS, ...LS.get(WEIGHTS_KEY, {}) },
+  mult: { ...DEFAULT_MULT, ...LS.get(MULT_KEY, {}) },
+  tuneOpen: false, dirty: false,
   prefs: { sort: 'pgm', view: 'auto', ...LS.get(PREF_KEY, {}) },
   driverTable: [], today: null, year: null,
 };
@@ -48,6 +49,40 @@ const baseLabel = (b) => (b == null ? '' : b === 0.5 ? '50¢' : b >= 1 ? `$${b.t
 const isValue = (h) => !!(h.ml_dec && h.win_prob >= 0.15 && h.ml_dec >= 2 * Math.max(h.fair_odds, 0.5));
 const trk = (t) => esc((t || '').replace('Á', '⅝').replace('Â', '⅞'));
 const kind = (t) => (t.type.startsWith('KEY') ? 'key' : t.type.startsWith('BOX') ? 'box' : 'pass');
+
+const multText = (x) => (x === 0 ? 'Off' : x === 1 ? 'Normal' : `${+x.toFixed(2)}×`);
+const multWord = (x) => (x === 0 ? 'off' : x < 1 ? 'less' : x > 1 ? 'more' : 'normal');
+function customList() {
+  return FACTORS.filter((f) => (S.mult[f.key] ?? 1) !== 1).map((f) => [f.label, S.mult[f.key]]);
+}
+function presetName() {
+  for (const [k, p] of Object.entries(PRESETS)) {
+    const m = { ...DEFAULT_MULT, ...p.mult };
+    if (FACTORS.every((f) => (S.mult[f.key] ?? 1) === m[f.key])) return k;
+  }
+  return null;
+}
+function weightsBadge() {
+  const pk = presetName();
+  if (pk === 'normal') return `<a class="pill" href="#/settings">Weights: Normal</a>`;
+  if (pk) return `<a class="pill key" href="#/settings">Weights: ${esc(PRESETS[pk].label)}</a>`;
+  const c = customList();
+  return `<a class="pill key" href="#/settings" title="${esc(c.map(([l, x]) => `${l} ${multText(x)}`).join(', '))}">Custom weights: ${esc(c.slice(0, 2).map(([l, x]) => `${l} ${multText(x)}`).join(', '))}${c.length > 2 ? ` +${c.length - 2} more` : ''}</a>`;
+}
+function tuneHtml(compact = false) {
+  const pk = presetName();
+  const group = (g, title) => `<h3>${title}</h3><div class="weights">${FACTORS.filter((f) => f.group === g).map((f) => {
+    const x = S.mult[f.key] ?? 1;
+    return `<div class="w"><label for="m-${f.key}">${esc(f.label)}</label><output id="mo-${f.key}" class="${x > 1 ? 'up' : x < 1 ? 'down' : ''}">${multText(x)}</output>
+      <input type="range" id="m-${f.key}" min="0" max="3" step="0.25" value="${x}" data-m="${f.key}" aria-describedby="mh-${f.key}">
+      <div class="wh" id="mh-${f.key}">${esc(f.help)}</div></div>`;
+  }).join('')}</div>`;
+  return `<div class="panel tune">
+    <div class="presets"><span class="note">Start from:</span>${Object.entries(PRESETS).map(([k, p]) => `<button class="btn small ${pk === k ? 'primary' : ''}" data-preset="${k}">${esc(p.label)}</button>`).join('')}</div>
+    ${group('weight', 'Ranking factors')}${group('adj', 'Race-shape bonuses')}${group('pen', 'Penalties')}
+    <p class="note">Normal = the standard model. 2× counts a factor twice as much, 0.5× half as much, Off ignores it. Your settings stay in this browser${compact ? ' and apply to every race' : ''}.</p>
+  </div>`;
+}
 
 function setStatus(msg, err = false) {
   const el = $('#status');
@@ -99,7 +134,7 @@ function rescoreAll() {
   for (const r of S.card.races) scoreOne(r);
 }
 function scoreOne(r) {
-  scoreRace(r, { today: S.today, year: S.year, weights: S.weights, driverTable: S.driverTable, scratched: S.st.scratches[r.number] || [] });
+  scoreRace(r, { today: S.today, year: S.year, mult: S.mult, driverTable: S.driverTable, scratched: S.st.scratches[r.number] || [] });
 }
 const saveState = () => LS.set(stateKey(S.key), S.st);
 
@@ -158,8 +193,8 @@ function renderCard() {
   const nScr = Object.values(S.st.scratches).reduce((a, b) => a + b.length, 0);
   return `
   <div class="cardhead">
-    <div><h1>${esc(c.track)}</h1><div class="sub">${esc(c.date)} · ${c.races.length} races${nScr ? ` · ${nScr} scratched` : ''}</div></div>
-    <div class="row"><button class="btn small" data-act="new">Load another program</button></div>
+    <div><h1>${esc(c.track)}</h1><div class="sub">${esc(c.date)} · ${c.races.length} races${nScr ? ` · ${nScr} scratched` : ''} · ${weightsBadge()}</div></div>
+    <div class="row"><button class="btn small primary" data-act="pdf">Download PDF</button><button class="btn small" data-act="print">Print</button><button class="btn small" data-act="new">Load another program</button></div>
   </div>
   <div class="bestbets"><b>Best bets:</b> ${best.map((r) => `<a href="#/race/${r.number}"><b>R${r.number}</b> #${r.ranked[0].pgm} ${esc(tc(r.ranked[0].name))}</a> (${r.confidence}/5)`).join(' &nbsp;·&nbsp; ')}</div>
   <div class="races">
@@ -310,18 +345,13 @@ function renderRace(n) {
     const mark = (v) => (v == null ? '<span class="faint">no play</span>' : v ? '<span class="ok">hit</span>' : '<span class="no">miss</span>');
     graded = `<div class="graded">Pick #${snap.order[0]}: ${g.win ? '<span class="ok">won</span>' : g.itm ? '<span class="ok">in the money</span>' : '<span class="no">out</span>'} · Exacta ${mark(g.exacta)} · Trifecta ${mark(g.trifecta)} · Superfecta ${mark(g.superfecta)}</div>`;
   }
-  const v = S.prefs.view;
   return `
   <div class="racenav"><a class="btn small" href="#/">← Card</a>
     <div class="tabs">${S.card.races.map((x) => `<a href="#/race/${x.number}" class="${x.number === n ? 'on' : ''}">${x.number}</a>`).join('')}</div></div>
-  ${bannerHtml(r)}${projHtml(r)}${betsHtml(r)}
-  <div class="why">${whyHtml(r)}</div>
-  <div class="toolbar">
-    <div class="seg" role="group" aria-label="Sort horses"><button data-sort="pgm" class="${S.prefs.sort === 'pgm' ? 'on' : ''}">Program #</button><button data-sort="proj" class="${S.prefs.sort === 'proj' ? 'on' : ''}">Projected</button></div>
-    <div class="seg" role="group" aria-label="Layout"><button data-view="auto" class="${v === 'auto' ? 'on' : ''}">Auto</button><button data-view="cards" class="${v === 'cards' ? 'on' : ''}">Cards</button><button data-view="table" class="${v === 'table' ? 'on' : ''}">Table</button></div>
-  </div>
-  <div class="horses hview-cards ${v === 'auto' ? 'auto' : v === 'cards' ? 'force' : 'hide'}">${sorted.map((h) => horseCard(h, r, scrSet.has(h.pgm))).join('')}</div>
-  <div class="hview-table ${v === 'auto' ? 'auto' : v === 'table' ? 'force' : 'hide'}">${horseTable(r, sorted, scrSet)}</div>
+  <div id="raceTop">${raceTopHtml(r)}</div>
+  <div class="tunebar"><button class="btn small ${S.tuneOpen ? 'primary' : ''}" data-act="tune" aria-expanded="${S.tuneOpen}">${S.tuneOpen ? 'Hide weights' : 'Tune weights'}</button><span id="wbadge">${weightsBadge()}</span></div>
+  ${S.tuneOpen ? tuneHtml(true) : ''}
+  <div id="raceBody">${raceBodyHtml(r)}</div>
   <div class="notes">
     <div class="panel"><h3>Notes — Race ${n}</h3><textarea data-notes="${n}" placeholder="Your notes for this race…">${esc(S.st.notes[n] || '')}</textarea></div>
     <div class="panel"><h3>Official order</h3><div class="order">
@@ -329,6 +359,21 @@ function renderRace(n) {
       </div>${graded || '<div class="graded note">Enter the result after the race to grade the picks and plays.</div>'}</div>
   </div>
   <div class="racenav" style="margin-top:14px">${n > 1 ? `<a class="btn" href="#/race/${n - 1}">← Race ${n - 1}</a>` : '<span></span>'}${S.card.races.some((x) => x.number === n + 1) ? `<a class="btn primary" href="#/race/${n + 1}">Race ${n + 1} →</a>` : ''}</div>`;
+}
+
+function raceTopHtml(r) {
+  return `${bannerHtml(r)}${projHtml(r)}${betsHtml(r)}<div class="why">${whyHtml(r)}</div>`;
+}
+function raceBodyHtml(r) {
+  const sorted = sortedHorses(r);
+  const scrSet = new Set(S.st.scratches[r.number] || []);
+  const v = S.prefs.view;
+  return `<div class="toolbar">
+    <div class="seg" role="group" aria-label="Sort horses"><button data-sort="pgm" class="${S.prefs.sort === 'pgm' ? 'on' : ''}">Program #</button><button data-sort="proj" class="${S.prefs.sort === 'proj' ? 'on' : ''}">Projected</button></div>
+    <div class="seg" role="group" aria-label="Layout"><button data-view="auto" class="${v === 'auto' ? 'on' : ''}">Auto</button><button data-view="cards" class="${v === 'cards' ? 'on' : ''}">Cards</button><button data-view="table" class="${v === 'table' ? 'on' : ''}">Table</button></div>
+  </div>
+  <div class="horses hview-cards ${v === 'auto' ? 'auto' : v === 'cards' ? 'force' : 'hide'}">${sorted.map((h) => horseCard(h, r, scrSet.has(h.pgm))).join('')}</div>
+  <div class="hview-table ${v === 'auto' ? 'auto' : v === 'table' ? 'force' : 'hide'}">${horseTable(r, sorted, scrSet)}</div>`;
 }
 
 // ---------------- render: record ----------------
@@ -383,22 +428,29 @@ function methodHtml() {
   <p><b>Added points</b>: lone speed +${ADJ.lone_speed}, closer with a hot pace +${ADJ.closer_setup}, driver upgrade +${ADJ.driver_up}/+${ADJ.driver_up_big}, tough trip that still finished close +${ADJ.tough_trip} each (max +${ADJ.tough_trip_cap}); speed duel ${ADJ.speed_duel}, driver downgrade ${ADJ.driver_down}. Penalties for breaks, layoffs, stale form and thin data.</p>
   <p><b>Winner confidence</b> blends the top pick's points margin with data quality. <b>Undercard</b> rates how often the projected 2nd–5th finish within one spot of projection in 40,000 simulated races.</p>
   <p><b>Plays</b>: trifecta KEY when the winner is 4/5+ and 30%+ to win; BOX the top three when the winner isn't a lock but the undercard is 3/5+; otherwise a 4-horse box or a pass. Exacta keys over the next two in key races and boxes the top three in box races. Superfecta keys over the next four when the undercard is 3/5+, or boxes four when it's 4/5+.</p>
-  <p><b>Default weights</b>: ${wt}. <b>Bold</b> pros and cons are the race-deciding ones. <b>VALUE</b> flags a top-3 contender the model gives 15%+ whose morning line is at least 2× its fair odds.</p></div>`;
+  <p><b>Opening speed</b> combines average position at the first quarter with the estimated opening-quarter time. <b>Season / lifetime mark</b> uses this year's mark, mile-adjusted (the lifetime mark, slightly discounted, if there's none this year).</p>
+  <p><b>Default weights</b>: ${wt}. Your settings multiply these (2× doubles a weight, Off sets it to zero); the race-shape bonuses and penalties scale the same way. <b>Bold</b> pros and cons are the race-deciding ones. <b>VALUE</b> flags a top-3 contender the model gives 15%+ whose morning line is at least 2× its fair odds.</p></div>`;
 }
 function renderSettings() {
-  return `<div class="cardhead"><div><h1>Settings</h1><div class="sub">Tune what matters to you. Changes re-rank every race instantly and stay in this browser.</div></div>
-    <div class="row"><button class="btn small" data-act="reset-weights">Reset to defaults</button></div></div>
-  <div class="panel"><h3>Ranking weights</h3><div class="weights">
-    ${Object.keys(DEFAULT_WEIGHTS).map((k) => `<div class="w"><label for="w-${k}">${WEIGHT_LABELS[k]}</label><output id="o-${k}">${S.weights[k]}</output>
-      <input type="range" id="w-${k}" min="0" max="30" step="1" value="${S.weights[k]}" data-w="${k}"></div>`).join('')}
-  </div><p class="note">0 turns a factor off. Default total is 100, but any mix works — what matters is how big each one is next to the others.</p></div>
+  return `<div class="cardhead"><div><h1>Settings</h1><div class="sub">Put more or less weight on what you trust. Every race re-ranks with your settings, and they stay in this browser — a friend's phone keeps their own. ${weightsBadge()}</div></div>
+    <div class="row"><button class="btn small" data-act="reset-weights">Back to normal</button></div></div>
+  ${tuneHtml()}
   <div style="margin-top:12px">${methodHtml()}</div>`;
 }
 
 // ---------------- print ----------------
 function buildPrint() {
   const c = S.card;
-  const cover = `<section class="pp cover"><h1>${esc(c.track)} <span class="muted" style="font-size:11pt">${esc(c.date)}</span></h1>
+  const costs = { exacta: 0, trifecta: 0, superfecta: 0 };
+  for (const r of c.races) for (const k of Object.keys(costs)) costs[k] += r[k].cost || 0;
+  const best = [...c.races].filter((r) => r.ranked.length > 1).sort((a, b) => (b.confidence - a.confidence) || ((b.ranked[0].score - b.ranked[1].score) - (a.ranked[0].score - a.ranked[1].score))).slice(0, 3);
+  const pk = presetName();
+  const wtxt = pk === 'normal' ? 'Normal weights' : pk ? `Preset: ${PRESETS[pk].label}` : 'Custom weights: ' + customList().map(([l, x]) => `${l} ${multText(x)}`).join(', ');
+  const nScr = Object.values(S.st.scratches).reduce((a, b) => a + b.length, 0);
+  const cover = `<section class="pp cover"><h1>Card summary — ${esc(c.track)} <span class="muted" style="font-size:11pt">${esc(c.date)}</span></h1>
+    <p style="margin:4px 0 0"><b>Best bets:</b> ${best.map((r) => `R${r.number} #${r.ranked[0].pgm} ${esc(tc(r.ranked[0].name))} (${r.confidence}/5)`).join(' · ')}
+    &nbsp;&nbsp;<b>All plays:</b> exacta $${costs.exacta.toFixed(2)} · trifecta $${costs.trifecta.toFixed(2)} · superfecta $${costs.superfecta.toFixed(2)} · total $${(costs.exacta + costs.trifecta + costs.superfecta).toFixed(2)}</p>
+    <p class="muted" style="margin:2px 0 0">${esc(wtxt)}${nScr ? ` · ${nScr} scratch${nScr > 1 ? 'es' : ''} applied` : ''}</p>
     <table><thead><tr><th>Race</th><th>Post</th><th>Gait</th><th>Purse</th><th>Winner</th><th>Undercard</th><th>Projected winner</th><th>2nd</th><th>3rd</th><th>Trifecta</th><th>Exacta</th><th>Superfecta</th></tr></thead><tbody>
     ${c.races.map((r) => { const rk = r.ranked; const p = (t) => (t.type === 'PASS' || t.type === 'N/A' ? `<span class="faint">${t.type === 'PASS' ? 'pass' : 'n/a'}</span>` : `${esc(tc(t.type))} ${esc(t.text)}`);
       return `<tr class="${r.confidence >= 5 ? 'hi' : ''}"><td><b>${r.number}</b></td><td>${esc(r.post_time)}</td><td>${esc(tc(r.gait))}</td><td>${money(r.purse)}</td>
@@ -415,7 +467,7 @@ function buildPrint() {
       <div class="pnotes"><span class="ord">OFFICIAL ORDER ${['1st', '2nd', '3rd', '4th'].map((l, i) => `${l}<span>${res[i] || ''}</span>`).join('')}</span>NOTES — RACE ${r.number}<br>${esc(S.st.notes[r.number] || '')}</div></section>`;
   }).join('');
   const root = $('#print');
-  root.innerHTML = cover + races;
+  root.innerHTML = races + cover;
   // shrink any page that would spill onto a second sheet (7.86in of printable height)
   const maxH = 7.8 * 96;
   for (const pg of root.querySelectorAll('.pp')) {
@@ -454,7 +506,7 @@ function renderRecent() {
 
 // ---------------- events ----------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open]');
+  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset]');
   if (!t) return;
   if (t.dataset.scr) {
     const n = +location.hash.match(/race\/(\d+)/)?.[1];
@@ -476,7 +528,15 @@ document.addEventListener('click', (e) => {
   } else if (t.dataset.act === 'new') {
     S.key = null; location.hash = '#/'; render(); $('#file').value = ''; $('#file').click();
   } else if (t.dataset.act === 'reset-weights') {
-    S.weights = { ...DEFAULT_WEIGHTS }; LS.set(WEIGHTS_KEY, {}); if (S.key) rescoreAll(); render();
+    applyMult({ ...DEFAULT_MULT });
+  } else if (t.dataset.preset) {
+    applyMult({ ...DEFAULT_MULT, ...PRESETS[t.dataset.preset].mult });
+  } else if (t.dataset.act === 'tune') {
+    S.tuneOpen = !S.tuneOpen; render();
+  } else if (t.dataset.act === 'pdf') {
+    downloadPdf();
+  } else if (t.dataset.act === 'print') {
+    buildPrint(); window.print();
   } else if (t.dataset.act === 'export') {
     const cards = LS.get(CARDS_KEY, {});
     const out = { exported: new Date().toISOString(), cards: {} };
@@ -517,12 +577,21 @@ document.addEventListener('change', async (e) => {
 document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.dataset.notes) { S.st.notes[t.dataset.notes] = t.value; saveState(); }
-  if (t.dataset.w) {
-    S.weights[t.dataset.w] = +t.value;
-    $('#o-' + t.dataset.w).textContent = t.value;
-    const diff = Object.fromEntries(Object.entries(S.weights).filter(([k, v]) => DEFAULT_WEIGHTS[k] !== v));
-    LS.set(WEIGHTS_KEY, diff);
-    clearTimeout(S._wt); S._wt = setTimeout(() => { if (S.key) rescoreAll(); }, 150);
+  if (t.dataset.m) {
+    const k = t.dataset.m, x = +t.value;
+    S.mult[k] = x;
+    const o = $('#mo-' + k);
+    o.textContent = multText(x); o.className = x > 1 ? 'up' : x < 1 ? 'down' : '';
+    saveMult();
+    document.querySelectorAll('[data-preset]').forEach((b) => b.classList.toggle('primary', b.dataset.preset === presetName()));
+    clearTimeout(S._wt);
+    S._wt = setTimeout(() => {
+      if (!S.key) return;
+      const n = +(location.hash.match(/race\/(\d+)/) || [])[1];
+      const r = n && S.card.races.find((x2) => x2.number === n);
+      if (r) { scoreOne(r); $('#raceTop').innerHTML = raceTopHtml(r); $('#raceBody').innerHTML = raceBodyHtml(r); $('#wbadge').innerHTML = weightsBadge(); }
+      S.dirty = true;
+    }, 120);
   }
 });
 
@@ -531,9 +600,67 @@ const drop = $('#drop');
 ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', (e) => loadFile(e.dataTransfer.files[0]));
 
-$('#printBtn').addEventListener('click', () => { if (!S.key) return; buildPrint(); window.print(); });
+$('#printBtn').addEventListener('click', () => downloadPdf());
 window.addEventListener('beforeprint', () => { if (S.key) buildPrint(); });
-window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => { if (S.dirty && S.key) { rescoreAll(); S.dirty = false; } render(); window.scrollTo(0, 0); });
+
+function saveMult() {
+  LS.set(MULT_KEY, Object.fromEntries(Object.entries(S.mult).filter(([k, v]) => v !== 1)));
+}
+function applyMult(m) {
+  S.mult = m; saveMult();
+  if (S.key) { rescoreAll(); S.dirty = false; }
+  render();
+}
+
+// ---------------- PDF file download ----------------
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    if (document.querySelector(`script[src="${src}"]`)) return res();
+    const el = document.createElement('script'); el.src = src; el.onload = res; el.onerror = () => rej(new Error('Could not load ' + src));
+    document.head.appendChild(el);
+  });
+}
+async function downloadPdf() {
+  if (!S.key || S._pdfBusy) return;
+  S._pdfBusy = true;
+  const ov = document.createElement('div');
+  ov.className = 'overlay'; ov.innerHTML = '<div class="overlay-box"><b>Building your PDF…</b><div id="pdfProg" class="note">Getting ready</div></div>';
+  document.body.appendChild(ov);
+  const root = $('#print');
+  try {
+    if (S.dirty) { rescoreAll(); S.dirty = false; }
+    await Promise.all([loadScript('vendor/html2canvas.min.js'), loadScript('vendor/jspdf.umd.min.js')]);
+    buildPrint();
+    root.classList.add('capture');
+    const pages = [...root.querySelectorAll('.pp')];
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'in', format: 'letter', compress: true });
+    const W = 11, H = 8.5, M = 0.3;
+    for (let i = 0; i < pages.length; i++) {
+      $('#pdfProg').textContent = `Page ${i + 1} of ${pages.length}`;
+      const pg = pages[i];
+      pg.style.zoom = '';
+      const canvas = await window.html2canvas(pg, { scale: 1.7, backgroundColor: '#ffffff', logging: false, windowWidth: pg.scrollWidth });
+      const img = canvas.toDataURL('image/jpeg', 0.8);
+      const ratio = canvas.width / canvas.height;
+      let w = W - 2 * M, h = w / ratio;
+      if (h > H - 2 * M) { h = H - 2 * M; w = h * ratio; }
+      if (i) doc.addPage('letter', 'landscape');
+      doc.addImage(img, 'JPEG', (W - w) / 2, M, w, h, undefined, 'FAST');
+      canvas.width = canvas.height = 0;
+    }
+    const name = `${(S.card.track || 'card').replace(/\W+/g, '-')}-${(S.card.date || '').replace(/^\w+, /, '').replace(/\W+/g, '-')}.pdf`.replace(/-+/g, '-');
+    doc.save(name);
+  } catch (e) {
+    console.error(e);
+    alert('Could not build the PDF: ' + (e.message || e) + '. You can still use Print → Save as PDF.');
+  } finally {
+    root.classList.remove('capture');
+    ov.remove();
+    S._pdfBusy = false;
+  }
+}
 
 // reopen the most recent card on this device
 (function init() {

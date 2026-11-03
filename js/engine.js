@@ -9,7 +9,7 @@ export const DEFAULT_WEIGHTS = {
   speed_best: 4,  // best SR in last 5
   mark: 10,       // avg mile/variant-adjusted final time
   close: 12,      // avg adjusted last quarter
-  early: 8,       // avg position at the first quarter
+  early: 8,       // first-quarter position + estimated opening-quarter time
   form: 16,       // avg finish last 3 starts
   class: 8,       // class ratings faced + circuit tier + same-track purse move
   year: 8,        // current-year win / top-3 %
@@ -17,12 +17,44 @@ export const DEFAULT_WEIGHTS = {
   trainer: 3,     // trainer win %
   post: 2,        // Trackmaster post rating
   late: 4,        // avg spots gained 3/4 -> finish
+  season_mark: 3, // current-year mark, mile-adjusted (lifetime mark if none this year)
+};
+
+// Everything a user can turn up or down. Multiplier 1 = normal.
+export const FACTORS = [
+  { key: 'speed', group: 'weight', label: 'Speed figures', help: 'Average Trackmaster speed rating in clean recent starts' },
+  { key: 'speed_best', group: 'weight', label: 'Best speed figure', help: 'Top speed rating in the last 5' },
+  { key: 'mark', group: 'weight', label: 'Average mile time', help: 'Average adjusted final time, last 5 clean starts' },
+  { key: 'season_mark', group: 'weight', label: 'Season / lifetime mark', help: 'This year\'s best mile, mile-adjusted' },
+  { key: 'early', group: 'weight', label: 'Opening speed (first ¼)', help: 'Position and estimated time at the first quarter' },
+  { key: 'close', group: 'weight', label: 'Closing speed (last ¼)', help: 'Horse\'s own last-quarter time' },
+  { key: 'late', group: 'weight', label: 'Late move (¾→finish)', help: 'Spots gained or lost after the 3/4 call' },
+  { key: 'form', group: 'weight', label: 'Recent form', help: 'Average finish over the last 3 starts' },
+  { key: 'class', group: 'weight', label: 'Class / shippers', help: 'Class ratings faced, circuit, purse moves' },
+  { key: 'year', group: 'weight', label: 'This-year record', help: 'Win % and top-3 % this year' },
+  { key: 'driver', group: 'weight', label: 'Driver', help: 'Driver UDR' },
+  { key: 'trainer', group: 'weight', label: 'Trainer', help: 'Trainer win %' },
+  { key: 'post', group: 'weight', label: 'Post position', help: 'Trackmaster post rating' },
+  { key: 'pace', group: 'adj', label: 'Pace setup', help: 'Lone speed bonus, speed-duel penalty, closer boost in a hot pace' },
+  { key: 'driver_change', group: 'adj', label: 'Driver change', help: 'Upgrade bonus / downgrade penalty vs last start' },
+  { key: 'tough_trip', group: 'adj', label: 'Tough-trip credit', help: 'Bonus for parked or first-over trips that still finished close' },
+  { key: 'breaks', group: 'pen', label: 'Break penalty', help: 'Penalty for breaking stride in the last 5' },
+  { key: 'layoff', group: 'pen', label: 'Layoff / stale-form penalty', help: 'Penalty for time off and old form lines' },
+];
+export const DEFAULT_MULT = Object.fromEntries(FACTORS.map((f) => [f.key, 1]));
+
+export const PRESETS = {
+  normal: { label: 'Normal', mult: {} },
+  closers: { label: 'Favor closers', mult: { close: 2, late: 2, early: 0.5, pace: 1.5 } },
+  speed: { label: 'Favor early speed', mult: { early: 2, pace: 2, close: 0.5, late: 0.5 } },
+  form_class: { label: 'Form & class', mult: { form: 1.75, class: 1.75, speed: 0.75, mark: 0.75 } },
+  times: { label: 'Times only', mult: { driver: 0, trainer: 0, year: 0.5, post: 0, driver_change: 0 } },
 };
 
 export const WEIGHT_LABELS = {
   speed: 'Speed figures', speed_best: 'Best speed figure', mark: 'Average mile time', close: 'Closing quarter',
   early: 'Opening speed', form: 'Recent form', class: 'Class / shippers', year: 'This year record',
-  driver: 'Driver', trainer: 'Trainer', post: 'Post position', late: 'Late move (¾→fin)',
+  driver: 'Driver', trainer: 'Trainer', post: 'Post position', late: 'Late move (¾→fin)', season_mark: 'Season mark',
 };
 
 export const ADJ = {
@@ -142,6 +174,7 @@ function horseMetrics(h, race, today, year) {
     m[`${key}_top3`] = pct((st.wins || 0) + (st.places || 0) + (st.shows || 0), s);
     m[`${key}_mark`] = st.mark ?? null;
     m[`${key}_mark_trk`] = st.mark_track || '';
+    m[`${key}_mark_adj`] = st.mark ? st.mark - offset(st.mark_size ?? 0.625) : null;
   }
   const ys = 0.4 * (m.yr_win || 0) + 0.6 * (m.yr_top3 || 0);
   const ls = 0.4 * (m.life_win || 0) + 0.6 * (m.life_top3 || 0);
@@ -318,8 +351,11 @@ function superfectaCall(race) {
   return { type: 'PASS', text: 'no superfecta play', combos: 0, cost: 0, hit: s.sf_box4, base, why: 'undercard too loose to cover 4 deep' };
 }
 
-export function scoreRace(race, { today, year, weights, driverTable, scratched = [] }) {
-  const W = { ...DEFAULT_WEIGHTS, ...(weights || {}) };
+export function scoreRace(race, { today, year, mult, driverTable, scratched = [] }) {
+  const M = { ...DEFAULT_MULT, ...(mult || {}) };
+  const W = Object.fromEntries(Object.entries(DEFAULT_WEIGHTS).map(([k, v]) => [k, v * (M[k] ?? 1)]));
+  const A = (key, v) => v * (key === 'lone_speed' || key === 'speed_duel' || key === 'closer_setup' ? M.pace
+    : key.startsWith('driver_') ? M.driver_change : key === 'tough_trip' ? M.tough_trip : 1);
   const hs = race.horses.filter((h) => !scratched.includes(h.pgm));
   if (!race.track_code) {
     const cnt = {};
@@ -334,9 +370,9 @@ export function scoreRace(race, { today, year, weights, driverTable, scratched =
   const closers = hs.filter((h) => h.m.close_q != null).sort((a, b) => a.m.close_q - b.m.close_q).slice(0, 3);
   for (const h of hs) {
     const m = h.m; m.adj = [];
-    if (early.length === 1 && early.includes(h)) m.adj.push(['lone_speed', ADJ.lone_speed]);
-    if (early.length >= 3 && early.includes(h)) m.adj.push(['speed_duel', ADJ.speed_duel]);
-    if (early.length >= 3 && closers.includes(h) && (m.open_pos || 0) >= 4.5) m.adj.push(['closer_setup', ADJ.closer_setup]);
+    if (early.length === 1 && early.includes(h)) m.adj.push(['lone_speed', A('lone_speed', ADJ.lone_speed)]);
+    if (early.length >= 3 && early.includes(h)) m.adj.push(['speed_duel', A('speed_duel', ADJ.speed_duel)]);
+    if (early.length >= 3 && closers.includes(h) && (m.open_pos || 0) >= 4.5) m.adj.push(['closer_setup', A('closer_setup', ADJ.closer_setup)]);
     m.drv_change = null;
     if (m.last_driver && h.driver && !sameDriver(h.driver, m.last_driver)) {
       const [, pu] = lookupUdr(driverTable || [], m.last_driver);
@@ -344,21 +380,23 @@ export function scoreRace(race, { today, year, weights, driverTable, scratched =
       m.drv_change = { prev: m.last_driver, prev_udr: pu };
       if (tu != null && pu != null) {
         const d = tu - pu;
-        if (d >= 0.10) m.adj.push(['driver_up_big', ADJ.driver_up_big]);
-        else if (d >= 0.05) m.adj.push(['driver_up', ADJ.driver_up]);
-        else if (d <= -0.05) m.adj.push(['driver_down', ADJ.driver_down]);
+        if (d >= 0.10) m.adj.push(['driver_up_big', A('driver_up_big', ADJ.driver_up_big)]);
+        else if (d >= 0.05) m.adj.push(['driver_up', A('driver_up', ADJ.driver_up)]);
+        else if (d <= -0.05) m.adj.push(['driver_down', A('driver_down', ADJ.driver_down)]);
         m.drv_change.delta = d;
       } else if (tu != null && tu >= 0.30) {
-        m.adj.push(['driver_up', ADJ.driver_up]);
+        m.adj.push(['driver_up', A('driver_up', ADJ.driver_up)]);
         m.drv_change.delta = null;
       }
     }
-    if (m.tough.length) m.adj.push(['tough_trip', Math.min(ADJ.tough_trip_cap, ADJ.tough_trip * m.tough.length)]);
+    if (m.tough.length) m.adj.push(['tough_trip', A('tough_trip', Math.min(ADJ.tough_trip_cap, ADJ.tough_trip * m.tough.length))]);
   }
   const col = (k) => hs.map((h) => h.m[k]);
   const comp = {
     speed: norm(col('sr_avg')), speed_best: norm(col('sr_best')), mark: norm(col('avg_mark'), false),
-    close: norm(col('close_q'), false), early: norm(col('open_pos'), false), form: norm(col('avg_fin3'), false),
+    close: norm(col('close_q'), false), form: norm(col('avg_fin3'), false),
+    early: (() => { const a = norm(col('open_pos'), false), b = norm(col('open_q'), false); return a.map((x, i) => 0.5 * x + 0.5 * b[i]); })(),
+    season_mark: norm(hs.map((h) => h.m.yr_mark_adj ?? (h.m.life_mark_adj != null ? h.m.life_mark_adj + 1.0 : null)), false),
     class: norm(col('class_val'), true, 0.4), late: norm(col('late_gain'), true, 0.4), year: norm(col('year_score')),
     driver: norm(col('driver_udr')), trainer: norm(col('trainer_w')), post: norm(col('post_rating'), true, 0.5),
   };
@@ -366,10 +404,12 @@ export function scoreRace(race, { today, year, weights, driverTable, scratched =
     const m = h.m;
     let s = 0;
     for (const k of Object.keys(W)) s += W[k] * (comp[k] ? comp[k][i] : 0);
-    let pen = Math.min(10, 4 * m.brk_l5);
-    if (m.days_real != null && m.days_real > 180) pen += m.qual_since ? 6 : 10;
-    else if (m.days_real != null && m.days_real > 45) pen += m.qual_since ? 3 : 6;
-    if (m.stale) pen += 3;
+    let pen = Math.min(10, 4 * m.brk_l5) * M.breaks;
+    let lay = 0;
+    if (m.days_real != null && m.days_real > 180) lay += m.qual_since ? 6 : 10;
+    else if (m.days_real != null && m.days_real > 45) lay += m.qual_since ? 3 : 6;
+    if (m.stale) lay += 3;
+    pen += lay * M.layoff;
     if (m.clean_n <= 1) pen += 4;
     const bonus = m.adj.reduce((a, [, v]) => a + v, 0);
     h.score = pyRound(s - pen + bonus, 1);
@@ -508,7 +548,7 @@ export function scoreCard(card, opts = {}) {
   const year = new Date(today).getUTCFullYear();
   const driverTable = cardDriverTable(card);
   for (const r of card.races) {
-    scoreRace(r, { today, year, weights: opts.weights, driverTable, scratched: (opts.scratches || {})[r.number] || [] });
+    scoreRace(r, { today, year, mult: opts.mult, driverTable, scratched: (opts.scratches || {})[r.number] || [] });
   }
   return card;
 }
