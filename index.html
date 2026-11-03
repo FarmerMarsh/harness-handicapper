@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Harness Handicapper</title>
+  <meta name="description" content="Upload a Trackmaster harness program and get every race ranked, with pros and cons, confidence ratings and exacta / trifecta / superfecta plays.">
+  <meta name="theme-color" content="#14213d">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2314213d'/%3E%3Ctext x='32' y='44' font-size='34' text-anchor='middle' font-family='Arial' font-weight='700' fill='%23f2b134'%3EH%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/" aria-label="Harness Handicapper home"><span class="logo">H</span><span>Harness Handicapper</span></a>
+    <nav class="topnav" id="topnav" hidden>
+      <a href="#/" data-nav="card">Card</a>
+      <a href="#/record" data-nav="record">Record</a>
+      <a href="#/settings" data-nav="settings">Settings</a>
+      <button type="button" class="btn ghost" id="printBtn">Print / PDF</button>
+    </nav>
+  </header>
+
+  <main id="app" tabindex="-1">
+    <section class="upload" id="upload">
+      <h1>Drop in a harness program.<br>Get every race handicapped.</h1>
+      <p class="lede">Works with USTA / Trackmaster program PDFs. Each race comes back ranked with the projected top five, pros and cons, confidence ratings and exacta, trifecta and superfecta plays.</p>
+      <label class="drop" id="drop">
+        <input type="file" id="file" accept="application/pdf,.pdf">
+        <span class="drop-title">Choose program PDF</span>
+        <span class="drop-sub">or drag it here</span>
+      </label>
+      <p class="privacy">Your program never leaves your device — it's read right here in your browser.</p>
+      <div class="status" id="status" role="status" aria-live="polite"></div>
+      <div class="recent" id="recent"></div>
+    </section>
+    <section id="view" hidden></section>
+  </main>
+
+  <div id="print" class="print-root" aria-hidden="true"></div>
+
+  <footer class="foot">
+    Model estimates from the program — check scratches and changes before you bet. Bet responsibly.
+  </footer>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
