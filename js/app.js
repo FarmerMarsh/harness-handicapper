@@ -1,9 +1,9 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js';
+import { parseProgram, fmtTime } from './parse.js?v=6';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
-} from './engine.js';
+} from './engine.js?v=6';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -234,12 +234,13 @@ const HL = {
   lw: [(m) => (m.life_starts >= 5 ? m.life_win : null), 1], lt: [(m) => (m.life_starts >= 5 ? m.life_top3 : null), 1],
   yw: [(m) => (m.yr_starts >= 3 ? m.yr_win : null), 1], yt: [(m) => (m.yr_starts >= 3 ? m.yr_top3 : null), 1],
   cls: [(m) => m.cr_avg3, 1],
+  tmp: [(m, h) => h.tm?.power, 1], tms: [(m, h) => h.tm?.speed, 1], tmc: [(m, h) => h.tm?.pace, 1], tmk: [(m, h) => h.tm?.class, 1],
 };
 function highlights(r) {
   const out = {};
   const act = (r.active || []).filter((h) => h.m);
   for (const [key, [f, dir]] of Object.entries(HL)) {
-    const vals = act.map((h) => [h.pgm, f(h.m)]).filter(([, v]) => v != null && isFinite(v)).map(([p, v]) => [p, Math.round(v * 100) / 100]);
+    const vals = act.map((h) => [h.pgm, f(h.m, h)]).filter(([, v]) => v != null && isFinite(v)).map(([p, v]) => [p, Math.round(v * 100) / 100]);
     if (vals.length < 3) continue;
     const nums = vals.map(([, v]) => v);
     const hi = Math.max(...nums), lo = Math.min(...nums);
@@ -327,6 +328,15 @@ function statCells(h, hl) {
   ];
 }
 
+// TrackMaster's own Power / Speed / Pace / Class ratings (Platinum programs) — shown, not scored
+function tmLine(h, hl) {
+  const t = h.tm;
+  if (!t || [t.power, t.speed, t.pace, t.class].every((x) => x == null)) return '';
+  const c = (k) => hlClass(hl, k, h.pgm);
+  const one = (lbl, v, k) => (v == null ? '' : `${lbl} ${hv(c(k), Number.isInteger(v) ? v : v.toFixed(1))}`);
+  return `<span class="tmr">TM ${[one('Power', t.power, 'tmp'), one('Speed', t.speed, 'tms'), one('Pace', t.pace, 'tmc'), one('Class', t.class, 'tmk')].filter(Boolean).join(' · ')}</span>`;
+}
+
 function extraLine(h) {
   const m = h.m, x = [];
   if (h.claim) x.push(`clm ${h.claim}`);
@@ -346,7 +356,7 @@ function horseCard(h, r, scr, hl) {
       <div class="h-pgm">${h.pgm}</div>
       <div style="min-width:0"><div class="h-name">${esc(tc(h.name))} ${scr ? '' : valueTag(h)}</div>
         <div class="h-sub">${esc(tc(h.driver))}${h.drv_w != null ? ` (${h.drv_w}%)` : ''} · ${esc(tc(h.trainer))}${h.trn_w != null ? ` (${h.trn_w}%)` : ''}</div>
-        <div class="h-extra">${esc(extraLine(h))}</div></div>
+        <div class="h-extra">${esc(extraLine(h))}</div>${scr ? '' : `<div class="h-extra">${tmLine(h, hl)}</div>`}</div>
       <div class="h-right">${proj}<div class="h-ml">ML ${esc(h.ml)}${!scr && h.line ? ` · line ${esc(h.line)}` : ''}</div></div>
     </div>
     ${scr || !h.m ? '' : `<div class="h-stats">${statCells(h, hl).map(([k, v, s]) => `<div class="st"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('')}</div>
@@ -367,7 +377,7 @@ function horseTable(r, sorted, scrSet, forPrint = false) {
     const vt = scr ? '' : h.value === 'good' ? '<span class="s gv">good value</span>' : h.value === 'bad' ? '<span class="s bv">bad value</span>' : '';
     return `<tr class="${cls}">
       <td>${scrCell}</td><td><b style="font-size:1.15em">${h.pgm}</b></td>
-      <td class="l"><span class="h-name"><b>${esc(tc(h.name))}</b></span><span class="s">${esc(tc(h.driver))} · ${esc(tc(h.trainer))}</span><span class="s faint">${esc(extraLine(h))}</span></td>
+      <td class="l"><span class="h-name"><b>${esc(tc(h.name))}</b></span><span class="s">${esc(tc(h.driver))} · ${esc(tc(h.trainer))}</span><span class="s faint">${esc(extraLine(h))}</span>${scr ? '' : `<span class="s">${tmLine(h, hl)}</span>`}</td>
       <td>${esc(h.ml)}${vt}</td>
       <td>${scr ? 'SCR' : `<b>${h.rank}</b><span class="s">${Math.round(h.win_prob * 100)}%</span>`}</td>
       ${[0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => `<td>${c(i)}</td>`).join('')}
@@ -755,6 +765,7 @@ function methodHtml() {
   <p><b>Mile-adjusted times (*)</b>: every time is converted to a mile-track equivalent (half-mile −2.0s, ⅝ −1.0s, ⅞ −0.4s; quarters get ¼ of that), then corrected for the program's track variant (0.2s per point, capped at ±1.6s), which also covers off tracks.</p>
   <p><b>Avg mark</b>: average final time over the last 5 starts, throwing out breaks, parked-out trips (3-wide at any call or first-over at 3+ calls), qualifiers and DNFs — only races from the last 120 days when there are any.</p>
   <p><b>Open ¼</b>: estimated time at the first quarter (leader's quarter + 0.2s per length behind) and average position there. <b>Close ¼</b>: the horse's own last quarter. <b>¾→Fin</b>: average spots gained or lost from the 3/4 call to the wire. <b>Avg fin L3</b>: average finish over the last 3 real starts.</p>
+  <p><b>Post position</b> uses the program's post rating and counts more on tighter tracks — half-mile 4×, ⅝ 2.5×, ⅞ 1.5×, mile 1× — on top of your own post setting. <b>TM ratings</b> (Power, Speed, Pace, Class) are TrackMaster's own numbers from Platinum programs; they're shown for reference and highlighted, but not scored.</p>
   <p><b>Green / red</b>: the best and worst number in the race for each column (marks compared mile-adjusted; win % needs 5+ lifetime or 3+ this-year starts).</p>
   <p><b>Class</b>: average class rating of the last 3 races versus today's, plus a circuit adjustment for shippers (Yonkers, the Meadowlands and Mohawk tougher; Vernon, Tioga, fairs softer).</p>
   <p><b>Added points</b>: lone speed +${ADJ.lone_speed}, closer with a hot pace +${ADJ.closer_setup}, driver upgrade +${ADJ.driver_up}/+${ADJ.driver_up_big}, tough trip that still finished close +${ADJ.tough_trip} each (max +${ADJ.tough_trip_cap}); speed duel ${ADJ.speed_duel}, driver downgrade ${ADJ.driver_down}. Penalties for breaks, layoffs, stale form and thin data.</p>

@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js';
+import { fmtTime } from './parse.js?v=6';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -38,13 +38,14 @@ export const FACTORS = [
   { key: 'year', group: 'weight', label: 'This-year record', help: 'Win % and top-3 % this year' },
   { key: 'driver', group: 'weight', label: 'Driver', help: 'Driver UDR' },
   { key: 'trainer', group: 'weight', label: 'Trainer', help: 'Trainer win %' },
-  { key: 'post', group: 'weight', label: 'Post position', help: 'Trackmaster post rating' },
+  { key: 'post', group: 'weight', label: 'Post position', help: 'Program post rating, weighted by track size: half-mile 4×, ⅝ 2.5×, ⅞ 1.5×, mile 1×' },
   { key: 'pace', group: 'adj', label: 'Pace setup', help: 'Lone speed bonus, speed-duel penalty, closer boost in a hot pace' },
   { key: 'driver_change', group: 'adj', label: 'Driver change', help: 'Upgrade bonus / downgrade penalty vs last start' },
   { key: 'tough_trip', group: 'adj', label: 'Tough-trip credit', help: 'Bonus for parked or first-over trips that still finished close' },
   { key: 'breaks', group: 'pen', label: 'Break penalty', help: 'Penalty for breaking stride in the last 5' },
   { key: 'layoff', group: 'pen', label: 'Layoff / stale-form penalty', help: 'Penalty for time off and old form lines' },
 ];
+export const POST_SCALE = { 0.5: 4, 0.625: 2.5, 0.875: 1.5, 1: 1 };
 export const DEFAULT_MULT = Object.fromEntries(FACTORS.map((f) => [f.key, 1]));
 
 export const PRESETS = {
@@ -612,6 +613,15 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
     for (const [k, v] of Object.entries(cnt)) if (v > bc) { best = k; bc = v; }
     race.track_code = best;
   }
+  if (race.track_size == null) {
+    const sz = {};
+    for (const h of race.horses) for (const p of h.pp.slice(0, 5)) if (p.track && trackKey(p.track) === race.track_code) sz[p.size] = (sz[p.size] || 0) + 1;
+    const top = Object.entries(sz).sort((a, b) => b[1] - a[1])[0];
+    race.track_size = top ? +top[0] : null;
+  }
+  // post matters more the tighter the track: half-mile 4x, 5/8 2.5x, 7/8 1.5x, mile 1x
+  race.post_scale = POST_SCALE[race.track_size] ?? 2;
+  W.post *= race.post_scale;
   for (const h of hs) h.m = horseMetrics(h, race, today, year);
   const early = hs.filter((h) => h.m.open_pos != null && h.m.open_pos <= 2.5 && h.m.clean_n >= 2 && !h.m.stale);
   race.pace = { early: early.map((h) => h.pgm) };
@@ -659,7 +669,7 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
     if (m.stale) lay += 3;
     const thin = m.clean_n <= 1 ? 4 : 0;
     const pen = brk * M.breaks + lay * M.layoff + thin;
-    h.feat = { c: Object.fromEntries(Object.keys(DEFAULT_WEIGHTS).map((k) => [k, comp[k] ? +comp[k][i].toFixed(4) : 0])),
+    h.feat = { c: Object.fromEntries(Object.keys(DEFAULT_WEIGHTS).map((k) => [k, comp[k] ? +(comp[k][i] * (k === 'post' ? race.post_scale : 1)).toFixed(4) : 0])),
       a: { ...m.adjRaw }, p: { breaks: brk, layoff: lay, thin } };
     const bonus = m.adj.reduce((a, [, v]) => a + v, 0);
     h.score = pyRound(s - pen + bonus, 1);
@@ -782,8 +792,10 @@ function prosCons(h, hs, race, year) {
   }
   const prt = m.post_rating;
   if (prt != null) {
-    if (prt >= 20) P(`Good post (PP${h.pgm} rating +${prt})`, 1);
-    else if (prt <= -20) C(`Tough post (PP${h.pgm} rating ${prt})`, prt <= -30 ? 2 : 1);
+    const tight = (race.post_scale || 1) >= 2.5;   // half-mile or 5/8 track
+    const trkTxt = race.track_size === 0.5 ? ' on a half-mile track' : race.track_size === 0.625 ? ' on a ⅝ track' : '';
+    if (prt >= 20) P(`Good post (PP${h.pgm} rating +${prt})${tight ? trkTxt : ''}`, tight && prt >= 40 ? 3 : tight ? 2 : 1);
+    else if (prt <= -20) C(`Tough post (PP${h.pgm} rating ${prt})${tight ? trkTxt : ''}`, tight && prt <= -40 ? 3 : prt <= -30 || tight ? 2 : 1);
   }
   const lg = m.late_gain;
   if (lg != null && m.late_pairs.length >= 2) {
