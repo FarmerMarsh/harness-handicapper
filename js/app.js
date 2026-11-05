@@ -1,9 +1,9 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=8';
+import { parseProgram, fmtTime } from './parse.js?v=9';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
-} from './engine.js?v=8';
+} from './engine.js?v=9';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -118,7 +118,7 @@ async function loadFile(file) {
     setStatus(`Reading ${doc.numPages} pages…`);
     const card = await parseProgram(doc);
     if (!card.races.length || !card.races.some((r) => r.horses.length)) {
-      setStatus("Couldn't find Trackmaster race pages in that PDF. Try the program PDF from the track or trackmaster.com.", true);
+      setStatus("Couldn't find race pages in that PDF. It reads the standard USTA program the tracks print (Dayton, Scioto, Northfield…) and Trackmaster programs — try the track's own program PDF.", true);
       return;
     }
     const key = `${card.track || 'Track'}|${card.date || file.name}`;
@@ -293,7 +293,7 @@ function renderCard() {
       if (!rk.length) return '';
       return `<a class="racecard ${r.confidence >= 5 ? 'top' : ''}" href="#/race/${r.number}">
         <div class="rc-head"><div class="rc-num">${r.number}</div>
-          <div class="rc-meta"><b>${esc(r.post_time)}</b> · ${esc(tc(r.gait))} · ${money(r.purse)}<br>${rk.length} starters</div>
+          <div class="rc-meta">${r.post_time ? `<b>${esc(r.post_time)}</b> · ` : ''}${esc(tc(r.gait))} · ${money(r.purse)}<br>${rk.length} starters</div>
           <div class="rc-conf"><span class="stars">${stars(r.confidence)}</span> <b>${r.confidence}/5</b><br><span class="stars u">${stars(r.undercard)}</span> <span class="muted">undercard</span></div>
         </div>
         <div class="rc-pick"><b>#${rk[0].pgm} ${esc(tc(rk[0].name))}</b> <span class="muted">(${esc(rk[0].ml)}) · ${Math.round(rk[0].win_prob * 100)}%</span></div>
@@ -440,9 +440,9 @@ function sortedHorses(r) {
 function bannerHtml(r) {
   return `<div class="banner">
     <div class="num"><small>RACE</small><span>${r.number}</span></div>
-    <div class="info"><div class="title">${esc(tc(r.gait))} · 1 Mile · ${money(r.purse)}</div>
-      <div class="meta">Post ${esc(r.post_time)} · Class rating ${r.cr ?? '—'} · ${r.ranked.length} starters</div>
-      <div class="cond">${esc(r.conditions)}</div></div>
+    <div class="info"><div class="title">${esc(tc(r.gait))} · ${esc(tc(r.distance || '1 Mile'))} · ${money(r.purse)}</div>
+      <div class="meta">${[r.post_time ? `Post ${esc(r.post_time)}` : '', r.cr != null ? `Class rating ${r.cr}` : '', `${r.ranked.length} starters`].filter(Boolean).join(' · ')}</div>
+      <div class="cond">${esc(r.conditions)}</div>${r.prog_notes && r.prog_notes.length ? `<div class="cond progn"><b>Program:</b> ${esc(r.prog_notes.join(' · '))}</div>` : ''}</div>
     <div class="conf"><div><span class="lbl">WINNER</span></div><div><span class="stars">${stars(r.confidence)}</span><b>${r.confidence}/5</b></div>
       <div><span class="lbl">UNDERCARD 2ND–5TH</span></div><div><span class="stars u">${stars(r.undercard)}</span><b>${r.undercard}/5</b></div></div>
   </div>`;
@@ -832,6 +832,7 @@ function methodHtml() {
   <p><b>Open ¼</b>: estimated time at the first quarter (leader's quarter + 0.2s per length behind) and average position there. <b>Close ¼</b>: the horse's own last quarter. <b>¾→Fin</b>: average spots gained or lost from the 3/4 call to the wire. <b>Avg fin L3</b>: average finish over the last 3 real starts.</p>
   <p><b>Post position</b> uses the track's real win rate from each post — from the program's post-position table when it has one (fast or off track, blended 75/25 with the last 30 days), otherwise each horse's post rating. Tracks where post matters more (half-miles) have bigger swings, so post counts for more there automatically.</p>
   <p><b>Speed trend</b>: the slope of speed figures over the last 3–4 starts without a break — rising horses get credit, sliding ones lose it. <b>Hot / cold</b>: driver UDR and trainer UTR over the last 30 days vs the year. <b>Connections &amp; course</b>: the driver/trainer team's record together, the horse's record at this track, and a first or second start for a new barn (better or weaker trainer). <b>Off-track</b> (only when the track is set to Off): the horse's off-track record vs its overall record, plus the sire's off-track win rate. <b>Trotters</b>: breaks count over the last 10 lines (qualifiers too), a break last time adds more, and a trotter with no breaks in its last 6+ starts gets a pro.</p>
+  <p><b>Standard USTA programs</b> (most tracks) don't print speed or class ratings, so speed figures are built from each mile time — adjusted for track size and the off-track variant, on the same scale as Trackmaster's ratings (within about ±5 points). Driver and trainer stats there are for the current meet, so small samples are pulled toward average. They don't print post-position stats either, so post uses a typical post index for the track's size until we load the track's real numbers.</p>
   <p> <b>TM ratings</b> (Power, Speed, Pace, Class) are TrackMaster's own numbers from Platinum programs; they're shown for reference and highlighted, but not scored.</p>
   <p><b>Green / red</b>: the best and worst number in the race for each column (marks compared mile-adjusted; win % needs 5+ lifetime or 3+ this-year starts).</p>
   <p><b>Class</b>: average class rating of the last 3 races versus today's, plus a circuit adjustment for shippers (Yonkers, the Meadowlands and Mohawk tougher; Vernon, Tioga, fairs softer).</p>

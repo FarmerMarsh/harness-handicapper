@@ -1,4 +1,4 @@
-// Trackmaster (USTA) harness program parser — runs on pdf.js text content.
+// Harness program parsers — Trackmaster (standard + Platinum) and the standard USTA program — run on pdf.js text content.
 // Port of parse_tm.py. Coordinates are in PDF points from the top-left, like pdfplumber.
 
 export const TRACK_SIZE = { 'Á': 0.625, 'Â': 0.875, '½': 0.5, '1': 1.0 };
@@ -214,8 +214,17 @@ export async function pageWords(page) {
   return { words, height: vp.height };
 }
 
+// Which program is this? USTA "Race Page" programs (Crystal Reports, used by most tracks) vs Trackmaster.
+export function isUSTA(ws) {
+  return ws.some((w) => /^Tr-[A-Z]/.test(w.text)) && ws.some((w) => /^STARTS-\$/.test(w.text));
+}
+
 export async function parseProgram(pdfDoc) {
-  const card = { track: null, date: null, races: [] };
+  for (let pn = 1; pn <= Math.min(3, pdfDoc.numPages); pn++) {
+    const { words } = await pageWords(await pdfDoc.getPage(pn));
+    if (isUSTA(words)) return parseUSTA(pdfDoc);
+  }
+  const card = { track: null, date: null, races: [], format: 'trackmaster' };
   for (let pn = 1; pn <= pdfDoc.numPages; pn++) {
     const page = await pdfDoc.getPage(pn);
     const { words: ws, height } = await pageWords(page);
@@ -369,5 +378,257 @@ export async function parseProgram(pdfDoc) {
   }
   card.races.sort((a, b) => a.number - b.number);
   if (card.post_stats) for (const r of card.races) r.post_stats = card.post_stats;
+  return card;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Standard USTA program ("Race Page", printed by most tracks — Dayton, Scioto, Northfield, ...).
+// One race per page; past lines: Date Trk Purse Tc Tmp FL U/D Det Med Class Dis | leader 1/4 1/2 3/4 Time |
+// PP 1/4 1/2 3/4 Str Fin | Ind 1/4, Ind Time | Odds Drv Trn | First Second Third | Strs.
+// No Trackmaster speed or class ratings, so speed figures are built from the time (see usaSR).
+
+const USTA_GLYPH = { '⅝': 'Á', '⅞': 'Â', '½': '' };
+const OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
+const ustaSize = (trk) => { const c = trk.slice(-1); return c === 'Á' ? 0.625 : c === 'Â' ? 0.875 : c === '1' ? 1.0 : 0.5; };
+const MONS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// Speed figure on the Trackmaster scale, fitted to Trackmaster ratings on the Pocono and Monticello programs
+// (SR ≈ 388 − 2.75 × mile-adjusted seconds, after the track variant). About ±5 of the real rating.
+export function usaSR(time, size, varSec = 0) {
+  if (time == null) return null;
+  return Math.round(388 - 2.75 * (time - (OFFSET[size] ?? 1.0) - varSec));
+}
+
+function parseUSTARow(ws, dateText, year) {
+  ws = [...ws].sort((a, b) => a.x0 - b.x0);
+  const inn = (a, b) => ws.filter((w) => w.x0 >= a && w.x0 < b);
+  const txt = (a, b) => inn(a, b).map((w) => w.text).join(' ').trim();
+  const [mo, dy] = dateText.split('-').map(Number);
+  const row = { date: `${String(dy).padStart(2, '0')}${MONS[mo - 1] || 'Jan'}${year}`, race_no: txt(38, 47) };
+  row.track = inn(46, 62).map((w) => w.text).join('');
+  row.size = ustaSize(row.track);
+  row.cond = txt(88, 96);
+  const tv = txt(96, 108).match(/^(\d+)?(?:-(\d+))?/);
+  row.temp = tv && tv[1] ? +tv[1] : null;
+  const varSec = tv && tv[2] ? +tv[2] : 0;
+  row.var = varSec * 5;                       // engine reads variant in fifths
+  const p = txt(60, 88).replace(/,/g, '');
+  row.purse = isDigits(p) ? parseInt(p, 10) : null;
+  row.med = txt(108, 142);
+  row.cls = txt(142, 207);
+  const full = ws.map((w) => w.text).join(' ');
+  row.scratched = /\bSCR(ATCHED)?\b/.test(full);
+  row.qua = /^(QUA|Q\b|QUAL)/.test(row.cls);
+  if (row.scratched) return row;
+  row.lead_q1 = tsec(...numPair(inn(210, 226)));
+  row.lead_q2 = tsec(...numPair(inn(226, 240)));
+  row.lead_q3 = tsec(...numPair(inn(240, 257)));
+  row.lead_fin = tsec(...numPair(inn(257, 273)));
+  row.cr = null;
+  row.post_raw = txt(273, 288);
+  const pm = row.post_raw.match(/\d+/);
+  row.post = pm ? parseInt(pm[0], 10) : null;
+  const fs = txt(576, 600).replace(/[^\d]/g, '');
+  row.field = fs ? parseInt(fs, 10) : null;
+  const cols = [[288, 305], [305, 322], [322, 340], [340, 357], [357, 386]];
+  row.calls = cols.map(([a, b]) => { const t = inn(a, b).map((w) => w.text.replace(/°/g, 'º')); return t.length ? parseCall(t, row.field) : null; });
+  row.last_q = tsec(...numPair(inn(386, 400)));
+  row.horse_time = tsec(...numPair(inn(400, 414).filter((w) => !w.text.includes('.') && w.text !== 'NB')));
+  const ow = ws.find((w) => w.x0 >= 408 && w.x0 < 430 && (/\.\d\d$/.test(w.text) || w.text === 'NB'));
+  row.odds_raw = ow ? ow.text : '';
+  row.fav = row.odds_raw.includes('*');
+  const om = row.odds_raw.match(/\d*\.\d+/);
+  row.odds = om ? parseFloat(om[0]) : null;
+  row.driver_abbr = txt(429, 462);
+  row.trainer_abbr = txt(462, 495);
+  row.driver = row.driver_abbr;
+  row.order = txt(495, 576);
+  row.brk = row.post_raw.includes('x') || row.calls.some((c) => c && c.brk);
+  row.dnf = /\bdnf\b/.test(full) || row.calls.filter(Boolean).some((c) => /\b(pu|dnf|dis)\b/.test(c.raw));
+  row.parked_calls = row.calls.slice(0, 4).filter((c) => c && c.parked >= 1).length;
+  row.parked3w = row.calls.slice(0, 4).some((c) => c && c.parked >= 2);
+  const f = row.calls[4];
+  row.finish = f ? f.pos : null;
+  row.beaten = f ? f.margin : null;
+  const c1 = row.calls[0];
+  if (c1 && row.lead_q1 != null && c1.pos) {
+    row.open_q = row.lead_q1 + 0.2 * (c1.pos > 1 ? (c1.margin || 0) : 0);
+    row.open_pos = c1.pos;
+  } else { row.open_q = null; row.open_pos = null; }
+  row.sr = row.qua || row.brk || row.dnf ? null : usaSR(row.horse_time, row.size, varSec);
+  return row;
+}
+
+// "MaStLouisJr" / "BrtMiller" / "JaThmpsn" → the full name on today's card when it matches
+const subseq = (a, b) => { let i = 0; for (const ch of b) if (ch === a[i]) i++; return i === a.length; };
+function expandName(abbr, names) {
+  const m = (abbr || '').match(/^([A-Z][a-z]*)([A-Z].*)$/);
+  if (!m) return abbr || '';
+  const fi = m[1].toLowerCase(), la = m[2].toLowerCase().replace(/(jr|sr|iii|ii)$/, '').replace(/[^a-z]/g, '');
+  for (const n of names) {
+    const parts = n.replace(/\./g, '').split(/\s+/).filter((x) => !/^(jr|sr|iii|ii)$/i.test(x));
+    if (parts.length < 2) continue;
+    const first = parts[0].toLowerCase(), last = parts.slice(1).join('').toLowerCase().replace(/[^a-z]/g, '');
+    const p = Math.min(2, fi.length);   // "Tr" = Trevor, not Tyler: first two letters must match
+    if (first.startsWith(fi.slice(0, p)) && subseq(fi, first) && last[0] === la[0] && subseq(la, last)) return n;
+  }
+  return `${m[2].replace(/(Jr|Sr|III|II)$/, '')}, ${m[1]}`;
+}
+
+function ustaStats(bw) {
+  const res = {};
+  const labels = bw.filter((w) => w.x0 > 436 && w.x0 < 452 && (w.text === 'Life' || /^20\d\d$/.test(w.text)));
+  for (const lab of labels) {
+    const band = bw.filter((w) => w !== lab && w.x0 > 452 && w.x0 < 600 && w.top > lab.top - 2.3 && w.top < lab.top + 1.8).sort((a, b) => a.x0 - b.x0);
+    const nums = band.filter((w) => w.x0 < 507 && isDigits(w.text)).map((w) => +w.text);
+    const st = {};
+    if (nums.length >= 4) Object.assign(st, { starts: nums[0], wins: nums[1], places: nums[2], shows: nums[3] });
+    const e = band.find((w) => w.text.startsWith('$'));
+    st.earnings = e ? parseInt(e.text.replace(/[$,]/g, ''), 10) : 0;
+    const tm = band.find((w) => /^\d:\d\d$/.test(w.text) && w.x0 > 535);
+    if (tm) {
+      const fifth = band.find((w) => w.x0 > tm.x0 + 6 && w.x0 < tm.x0 + 14 && /^\d$/.test(w.text));
+      st.mark = tsec(tm.text, fifth ? fifth.text : null);
+      const after = band.filter((w) => w.x0 > tm.x0 + 6 && w !== fifth && !/^(ft|gd|sy|sl|my|hy|fr|wf)$/.test(w.text));
+      const code = after.map((w) => w.text).join('');
+      const g = code.slice(-1);
+      st.mark_track = g in USTA_GLYPH ? code.slice(0, -1) + USTA_GLYPH[g] : code;
+      st.mark_size = ustaSize(st.mark_track);
+      st.mark_q = band.some((w) => w.text === 'Q' && w.x0 < tm.x0);
+    }
+    if (!(lab.text in res)) res[lab.text] = st;
+  }
+  return res;
+}
+
+async function parseUSTA(pdfDoc) {
+  const card = { track: null, date: null, races: [], format: 'usta' };
+  const yy = (t) => (isDigits(t) && t.length === 2 ? t : null);
+  for (let pn = 1; pn <= pdfDoc.numPages; pn++) {
+    const { words: ws, height } = await pageWords(await pdfDoc.getPage(pn));
+    if (!ws.length) continue;
+    const rnW = ws.find((w) => w.size > 26 && w.top < 50 && w.x0 < 50 && isDigits(w.text));
+    const nums = ws.filter((w) => w.size > 14 && w.size < 20 && w.x0 < 40 && w.top > 80 && /^\d+[A-Z]?$/.test(w.text)).sort((a, b) => a.top - b.top);
+    if (!rnW && !nums.length) continue;
+    let race;
+    if (rnW) {
+      race = { number: parseInt(rnW.text, 10), horses: [] };
+      const line = (t0, t1, x0, x1) => ws.filter((w) => w.top >= t0 && w.top < t1 && w.x0 >= x0 && w.x0 < x1).sort((a, b) => (Math.round(a.top) - Math.round(b.top)) || (a.x0 - b.x0)).map((w) => w.text).join(' ');
+      const hdr = line(10, 65, 60, 230);
+      if (!card.track) {
+        const tl = line(10, 26, 60, 230);
+        card.track = titleCase(tl.trim());
+        const dm = hdr.match(/([A-Z][a-z]+day), ([A-Z][a-z]+) (\d+), (\d{4})/);
+        if (dm) card.date = `${dm[1]}, ${dm[2]} ${dm[3]}, ${dm[4]}`;
+      }
+      const pm = hdr.match(/PURSE \$([\d,]+)/);
+      race.purse = pm ? parseInt(pm[1].replace(/,/g, ''), 10) : null;
+      race.gait = (hdr.match(/\b(PACE|TROT)\b/) || [])[1] || '';
+      race.distance = (hdr.match(/(\d+(?:\/\d+)?\s+MILES?|\d+ YARDS)/) || [])[1] || '';
+      race.conditions = line(10, 65, 225, 462);
+      race.wagers = line(10, 65, 462, 612);
+      const ptm = line(10, 80, 0, 612).match(/POST(?: TIME)?\s*[-:]?\s*(\d{1,2}:\d\d)/);
+      race.post_time = ptm ? ptm[1] : '';
+      race.cr = null;
+      card.races.push(race);
+    } else {
+      race = card.races[card.races.length - 1];
+      if (!race) continue;
+    }
+    const footW = ws.filter((w) => (w.text === 'LINE:' && w.x0 < 90 && ws.some((x) => x.text === 'MORNING' && Math.abs(x.top - w.top) < 1.5)) || w.text.startsWith('©'));
+    const footer = footW.length ? Math.min(...footW.map((w) => w.top)) : height - 30;
+    const notes = ws.filter((w) => w.top >= footer - 1 && !w.text.startsWith('©') && w.top < height - 30);
+    if (notes.length) {
+      const byTop = {};
+      for (const w of notes) (byTop[Math.round(w.top)] ||= []).push(w);
+      // two columns of notes side by side: left (morning line / listed drivers) and right (eligibility, 2nd tier …)
+      const left = [], right = [];
+      for (const t of Object.keys(byTop).map(Number).sort((a, b) => a - b)) {
+        const r = byTop[t].sort((a, b) => a.x0 - b.x0);
+        const L = r.filter((w) => w.x0 < 250).map((w) => w.text).join(' '), M = r.filter((w) => w.x0 >= 250 && w.x0 < 440).map((w) => w.text).join(' '), R = r.filter((w) => w.x0 >= 440).map((w) => w.text).join(' ');
+        if (L) left.push(L); if (M) left.push(M); if (R) right.push(R);
+      }
+      race.prog_notes = [...left, right.join(' ')].filter(Boolean);
+      const ml = race.prog_notes.join(' ').match(/MORNING LINE:\s*([\d-]+)/);
+      if (ml) race.ml_order = ml[1].split('-').map(Number);
+      race.second_tier = (race.prog_notes.join(' ').match(/NO\. (\d+) STARTS FROM 2ND TIER/g) || []).map((x) => +x.match(/\d+/)[0]);
+    }
+    nums.forEach((nw, i) => {
+      const b0 = nw.top - 4.5, b1 = i + 1 < nums.length ? nums[i + 1].top - 4.5 : footer - 1;
+      const bw = ws.filter((w) => w.top >= b0 && w.top < b1);
+      const h = { pgm: parseInt(nw.text, 10), post_no: parseInt(nw.text, 10) };
+      const namew = bw.filter((w) => w.size > 12 && w.size < 15).sort((a, b) => a.x0 - b.x0);
+      h.name = namew.map((w) => w.text).join(' ').replace(/\((L|†|\+)\)/g, '').replace(/\s+/g, ' ').trim();
+      const nameTop = namew.length ? namew[0].top : nw.top + 6;
+      const tags = bw.filter((w) => w.x0 > 100 && w.x0 < 245 && Math.abs(w.top - nameTop) < 7 && /^\(/.test(w.text)).map((w) => w.text).join('');
+      h.lasix = /\(L\)/.test(tags) || /\(L\)/.test(namew.map((w) => w.text).join(''));
+      const firstDate = bw.filter((w) => w.x0 < 24 && /^\d{1,2}-(\d{1,2})?$/.test(w.text)).map((w) => w.top);
+      const ppTop = firstDate.length ? Math.min(...firstDate) : b1;
+      const ml = bw.find((w) => w.x0 >= 22 && w.x0 < 42 && w.top < ppTop - 2 && /^\d+-\d+$/.test(w.text));
+      h.ml = ml ? ml.text.replace('-', '/') : '';
+      if (h.ml) { const [a, b] = h.ml.split('/').map(Number); h.ml_dec = b ? a / b : null; } else h.ml_dec = null;
+      const clm = bw.find((w) => /^CLM-\$/.test(w.text));
+      h.claim = clm ? clm.text.replace('CLM-', '') : '';
+      const l4 = bw.find((w) => /^STARTS-\$/.test(w.text));
+      h.earn_l5 = l4 ? parseInt(l4.text.replace(/[^\d]/g, ''), 10) : null;
+      const byW = bw.find((w) => w.text === 'by' && w.x0 > 250 && w.x0 < 280 && w.top < ppTop);
+      h.pedigree = byW ? bw.filter((w) => Math.abs(w.top - byW.top) < 2 && w.x0 >= 245 && w.x0 < 440).sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ') : '';
+      const sa = h.pedigree.match(/^(\S+) (\w) (\d+) by/);
+      h.sex = sa ? sa[2] : ''; h.age = sa ? parseInt(sa[3], 10) : null;
+      // driver: "MARC ST LOUIS JR. (38) r blu-b go (6-2-0-1-.389)"; trainer: "Tr-STACEY CURRIE (5-1-0-1-.267)"
+      const top = bw.filter((w) => w.top < nw.top + 2.5).sort((a, b) => (Math.round(a.top) - Math.round(b.top)) || (a.x0 - b.x0));
+      const dWords = top.filter((w) => w.x0 >= 44 && w.x0 < 245);
+      const caps = [];
+      for (const w of dWords.filter((w) => w.top < nw.top - 0.5).sort((a, b) => a.x0 - b.x0)) { if (/^[A-Z][A-Z.'\-]*$/.test(w.text)) caps.push(w.text); else break; }
+      h.driver = titleCase(caps.join(' ').replace(/\.$/, ''));
+      const stat = (arr) => { const t = arr.map((w) => w.text).join(' ').match(/\((\d+)-(\d+)-(\d+)-(\d+)-(\.\d+|1\.000)\)/); return t ? { st: +t[1], w: +t[2], p: +t[3], s: +t[4], r: parseFloat(t[5]) } : null; };
+      const ds = stat(dWords);
+      h.drv_st = ds ? ds.st : null; h.drv_w = ds && ds.st ? Math.round((100 * ds.w) / ds.st) : null; h.drv_udr = ds ? ds.r : null;
+      const tW = top.filter((w) => w.x0 >= 245 && w.x0 < 440);
+      const trw = tW.find((w) => w.text.startsWith('Tr-'));
+      if (trw) {
+        const tn = [];
+        for (const w of tW.filter((w) => Math.abs(w.top - trw.top) < 1.5 && w.x0 >= trw.x0).sort((a, b) => a.x0 - b.x0)) { const t = w.text.replace(/^Tr-/, ''); if (/^[A-Z][A-Z.'\-]*$/.test(t)) tn.push(t); else break; }
+        h.trainer = titleCase(tn.join(' '));
+      } else h.trainer = '';
+      const ts = stat(tW);
+      h.trn_st = ts ? ts.st : null; h.trn_w = ts && ts.st ? Math.round((100 * ts.w) / ts.st) : null; h.trn_utr = ts ? ts.r : null;
+      h.stats = ustaStats(bw);
+      h.post_rating = null;
+      h.equip_note = '';
+      // past performance lines: each starts with a date "10-29" (or "10-" + day) at the left edge
+      const anchors = bw.filter((w) => w.x0 < 24 && /^\d{1,2}-(\d{1,2})?$/.test(w.text)).sort((a, b) => a.top - b.top);
+      h.pp = anchors.map((a, k) => {
+        const lo = a.top - 2.2, hi = k + 1 < anchors.length ? anchors[k + 1].top - 2.2 : b1;
+        const rw = bw.filter((w) => w.top >= lo && w.top < hi && w !== a);
+        let dt = a.text;
+        if (dt.endsWith('-')) { const d = rw.find((w) => w.x0 >= 24 && w.x0 < 34 && isDigits(w.text) && Math.abs(w.top - a.top) < 1.5); dt += d ? d.text : '1'; }
+        const yw = rw.find((w) => w.x0 >= 34 && w.x0 < 40 && yy(w.text));
+        return parseUSTARow(rw.filter((w) => w.x0 >= 38), dt, yw ? yw.text : String(new Date().getFullYear()).slice(2));
+      });
+      race.horses.push(h);
+    });
+  }
+  card.races.sort((a, b) => a.number - b.number);
+  // home track = the most common track in everyone's last start
+  const cnt = {};
+  for (const r of card.races) for (const h of r.horses) { const p = h.pp.find((x) => !x.scratched && !x.qua) || h.pp[0]; if (p && p.track) cnt[p.track] = (cnt[p.track] || 0) + 1; }
+  const home = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0];
+  if (home) {
+    card.track_code = home[0].replace(/[ÁÂ1]$/, '');
+    card.track_size = ustaSize(home[0]);
+    for (const r of card.races) { r.track_code = card.track_code; r.track_size = card.track_size; }
+  }
+  // USTA programs don't print post-position stats: use a typical post index for the track size
+  // (% above / below an average post's win rate), labelled as an estimate everywhere it shows.
+  const GEN = { 0.5: ['half-mile', [55, 30, 15, 5, -5, -20, -35, -50, -60, -65]], 0.625: ['⅝-mile', [25, 25, 20, 10, 0, -10, -20, -30, -45, -55]],
+    0.875: ['⅞-mile', [5, 15, 15, 10, 5, 0, -10, -15, -25, -35]], 1: ['mile', [5, 15, 15, 10, 5, 0, -10, -15, -25, -35]] };
+  const g = GEN[card.track_size];
+  if (g) { card.post_stats = { generic: g[0], fast: { win: g[1], starts: null }, off: null, last30: null }; for (const r of card.races) r.post_stats = card.post_stats; }
+  // expand "MaStLouisJr"-style past-line driver names to the full names on today's card
+  const names = [...new Set(card.races.flatMap((r) => r.horses.flatMap((h) => [h.driver, h.trainer])).filter(Boolean))];
+  for (const r of card.races) for (const h of r.horses) for (const p of h.pp) {
+    p.driver = expandName(p.driver_abbr, names);
+    p.trainer = expandName(p.trainer_abbr, names);
+  }
   return card;
 }

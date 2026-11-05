@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=8';
+import { fmtTime } from './parse.js?v=9';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -82,7 +82,7 @@ export const ADJ = {
 // rough circuit tiers (1 = toughest); unknown tracks default to 3
 const TRACK_TIER = {
   M: 1, YR: 1, Wbsb: 1, Moh: 1, Lex: 1, Mohk: 1,
-  PcD: 2, Phl: 2, Mea: 2, HoP: 2, DD: 2, ScD: 2, PRc: 2, Har: 2, MVR: 2, DTN: 3, Aces: 3, Bang: 4, Gosh: 4, Brtn: 4, Nrthv: 3,
+  PcD: 2, Phl: 2, Mea: 2, HoP: 2, DD: 2, ScD: 2, PRc: 2, Har: 2, MVR: 2, DTN: 3, Dtn: 3, Dela: 3, Lex: 1, Nfld: 3, Aces: 3, Bang: 4, Gosh: 4, Brtn: 4, Nrthv: 3,
   Nfld: 3, Stga: 3, VD: 3, TgDn: 3, Btva: 3, MR: 3, RcR: 3, GeoD: 3, OakGr: 3, Fhld: 3,
   Frybg: 4, Cumb: 4, Farm: 4, Skow: 4, Bang: 4, Scar: 4, Wind: 4, Oxfd: 4, Fair: 4, Topsh: 4, Union: 4, Northam: 4,
   Wdstk: 4, Hstng: 4, Fwvl: 4, Cntrv: 4, Allgn: 4, Elmra: 4, Grtz: 4, Mayfd: 4, Meadv: 4, Spr: 4, Caro: 4, Chfld: 4,
@@ -91,7 +91,7 @@ const TRACK_NAME = {
   M: 'the Meadowlands', YR: 'Yonkers', Wbsb: 'Mohawk', Lex: 'the Red Mile', PcD: 'Pocono', Phl: 'Philly',
   Mea: 'the Meadows', HoP: 'Hoosier', DD: 'Dover', ScD: 'Scioto', Nfld: 'Northfield', Stga: 'Saratoga',
   VD: 'Vernon', TgDn: 'Tioga', Btva: 'Batavia', MR: 'Monticello', RcR: 'Rosecroft', GeoD: 'Georgian', OakGr: 'Oak Grove',
-  PRc: 'Plainridge', Aces: 'Running Aces', Har: 'Harrington', MVR: 'Miami Valley', DTN: 'Dayton', Bang: 'Bangor',
+  PRc: 'Plainridge', Aces: 'Running Aces', Har: 'Harrington', MVR: 'Miami Valley', DTN: 'Dayton', Dtn: 'Dayton', Dela: 'Delaware (OH)', Cosh: 'Coshocton', Wostr: 'Wooster', Wseon: 'Wauseon', Knton: 'Kenton', Bang: 'Bangor',
   Frybg: 'Fryeburg Fair', Cumb: 'Cumberland Fair', Farm: 'Farmington Fair', Skow: 'Skowhegan Fair', Scar: 'Scarborough',
   Wind: 'Windsor Fair', Oxfd: 'Oxford Fair', Topsh: 'Topsham Fair', Union: 'Union Fair', Gosh: 'Goshen', Brtn: 'a fair track',
   Wdstk: 'Woodstock', Hstng: 'Hastings', Fhld: 'Freehold', Lex: 'the Red Mile', Mohk: 'Mohawk', Fwvl: 'Fowlerville', Nrthv: 'Northville',
@@ -203,8 +203,10 @@ function horseMetrics(h, race, today, year) {
   if (m.yr_starts >= 8) m.year_score = ys;
   else if (m.life_starts) { const w = m.yr_starts / 8; m.year_score = w * ys + (1 - w) * ls; }
   else m.year_score = null;
-  m.driver_udr = h.drv_udr ?? null;
-  m.trainer_w = h.trn_w ?? null;
+  // small samples (USTA programs print current-meet stats) are pulled toward an average driver / barn
+  const toward = (v, n, avg, k = 40) => (v == null ? null : n != null && n < k ? (v * n + avg * (k - n)) / k : v);
+  m.driver_udr = toward(h.drv_udr ?? null, h.drv_st, 0.200);
+  m.trainer_w = toward(h.trn_w ?? null, h.trn_st, 12);
   m.post_rating = h.post_rating ?? null;
   // speed trend: least-squares slope of speed figures over the last 4 real starts without a break (oldest → newest)
   const tr = real.filter((p) => p.sr && !p.brk && !p.dnf).slice(0, 4).map((p) => p.sr).reverse();
@@ -916,15 +918,16 @@ function prosCons(h, hs, race, year) {
     if (m.driver_udr >= 0.300 && !upgraded) P(`Top driver ${h.driver} (UDR ${m.driver_udr.toFixed(3)})`, 2);
     else if (m.driver_udr < 0.160) C(`Low-percentage driver (UDR ${m.driver_udr.toFixed(3)})`, 1);
   }
-  if (m.trainer_w != null && m.trn_hot == null) {
-    if (m.trainer_w >= 20) P(`Strong barn: trainer wins ${m.trainer_w}%`, 1);
-    else if (m.trainer_w <= 5) C(`Weak barn: trainer wins ${m.trainer_w}%`, 1);
+  if (h.trn_w != null && m.trn_hot == null && (h.trn_st == null || h.trn_st >= 15)) {
+    const st = h.trn_st != null ? ` (${h.trn_st} starts)` : '';
+    if (h.trn_w >= 20) P(`Strong barn: trainer wins ${h.trn_w}%${st}`, 1);
+    else if (h.trn_w <= 5) C(`Weak barn: trainer wins ${h.trn_w}%${st}`, 1);
   }
   const prt = m.post_idx != null ? Math.round(m.post_idx) : null;
   if (prt != null) {
     const pn = h.post_no ?? h.pgm;
     const trkTxt = race.track_size === 0.5 ? ' on a half-mile track' : race.track_size === 0.625 ? ' on a ⅝ track' : '';
-    const src = race.post_stats ? 'track win index' : 'rating';
+    const src = race.post_stats ? (race.post_stats.generic ? `typical ${race.post_stats.generic} post index` : 'track win index') : 'rating';
     if (prt >= 20) P(`Good post: PP${pn} (${src} +${prt})${trkTxt}`, prt >= 40 ? 3 : 2);
     else if (prt <= -20) C(`Tough post: PP${pn} (${src} ${prt})${trkTxt}`, prt <= -40 ? 3 : 2);
   }

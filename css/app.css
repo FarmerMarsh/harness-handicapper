@@ -416,3 +416,4 @@ details summary { cursor: pointer; margin-top: 8px; }
 .seg.small button { padding: 3px 8px; font-size: 12px; }
 .plangrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 3px 16px; font-size: 13px; margin: 4px 0; }
 .plangrid a { text-decoration: none; }
+.banner .progn { color: #d7deea; }
