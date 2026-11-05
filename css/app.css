@@ -186,10 +186,19 @@ table.ht .pcol li.b { font-weight: 700; }
 table.ht .pro li { color: var(--green-ink); } table.ht .con li { color: var(--red-ink); }
 
 .hview-table { display: none; }
-@media (min-width: 960px) {
+@media (min-width: 1100px) {
   .hview-cards.auto { display: none; }
   .hview-table.auto { display: block; }
 }
+@media (min-width: 760px) {
+  .horses.hview-cards { display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
+  .horses.hview-cards.hide { display: none !important; }
+  .horses.hview-cards.auto { display: grid; }
+  .horses.hview-cards.force { display: grid !important; }
+  .h-stats { grid-template-columns: repeat(4, 1fr); }
+}
+@media (min-width: 1100px) { .horses.hview-cards.auto { display: none; } }
+table.ht { min-width: 1080px; }
 .hview-cards.force { display: flex !important; }
 .hview-table.force { display: block !important; }
 .hview-cards.hide, .hview-table.hide { display: none !important; }
@@ -368,3 +377,22 @@ table.ht .s.gv, table.ht .s.bv { font-weight: 700; }
 .print-root .cover td.gv, .print-root .cover td.bv { font-weight: 600; }
 
 .pc li.none::before, table.ht li.none::before { content: ''; }
+
+/* picks verdicts */
+.ticket.play { border-left: 4px solid var(--green); }
+.why-line { font-size: 13.5px; margin: 2px 0 6px; }
+.alt { font-size: 13px; background: #f1f7f3; border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; }
+table.rec tr.tot td { font-weight: 700; border-top: 2px solid var(--rule); }
+table.rec.small td { font-size: 12.5px; padding: 4px 6px; }
+details summary { cursor: pointer; margin-top: 8px; }
+
+/* summary page 2 */
+.print-root .s2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+.print-root .s2box { border: 1px solid var(--rule); border-radius: 6px; padding: 6px 10px; }
+.print-root .s2box h2 { font-size: 10pt; margin: 0 0 3px; color: var(--navy); }
+.print-root .s2box ol, .print-root .s2box ul { margin: 0; padding-left: 16px; font-size: 8pt; line-height: 1.35; }
+.print-root .s2box ul.plain { list-style: none; padding-left: 0; }
+.print-root .s2box li { margin: 2px 0; }
+.print-root .s2box .small { font-size: 7pt; color: var(--muted); }
+.print-root .spend { margin-top: 8px; font-size: 8.5pt; background: var(--gold-l); border-radius: 6px; padding: 6px 10px; }
+.overlay-box p { max-width: 340px; margin: 8px auto 12px; }

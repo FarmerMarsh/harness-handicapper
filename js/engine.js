@@ -4,6 +4,10 @@ import { fmtTime } from './parse.js';
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
 
+// Points → win chance: p ∝ exp(score / TEMP). 35 keeps the lines in step with real morning lines
+// (favorites mostly 8-5 to 3-1, nothing shorter than even money on a normal card).
+export const TEMP = 35;
+
 export const DEFAULT_WEIGHTS = {
   speed: 20,      // avg Trackmaster speed rating, clean last 5
   speed_best: 4,  // best SR in last 5
@@ -245,7 +249,7 @@ function mulberry32(a) {
 function simulate(ranked, n = 40000, seed = 7) {
   const rnd = mulberry32(seed);
   const k = ranked.length;
-  const lam = ranked.map((h) => h.score / 22.0);
+  const lam = ranked.map((h) => h.score / TEMP);
   const posCount = Array.from({ length: k }, () => new Array(k).fill(0));
   const c = { key234: 0, key23: 0, box3: 0, box4: 0, straight: 0, exKey: 0, exBox3: 0, exBox2: 0, sfKey: 0, sfBox4: 0 };
   const near = new Array(k).fill(0);
@@ -297,7 +301,7 @@ function simulate(ranked, n = 40000, seed = 7) {
 
 function undercardConf(sim) {
   const u = sim.undercard_near;
-  for (const [stars, cut] of [[1, 0.49], [2, 0.52], [3, 0.56], [4, 0.62]]) if (u < cut) return stars;
+  for (const [stars, cut] of [[1, 0.433], [2, 0.458], [3, 0.48], [4, 0.53]]) if (u < cut) return stars;
   return 5;
 }
 
@@ -324,10 +328,13 @@ export function wagerBase(race, name) {
   return m ? { '50 CENT': 0.5, '20 CENT': 0.2, '10 CENT': 0.1, '$1': 1.0, '$2': 2.0 }[m[1]] : 1.0;
 }
 
-const isKeyRace = (race) => race.confidence >= 4 && race.ranked[0].win_prob >= 0.30;
+// Key when the top pick stands alone: 4/5+ confidence with a clear edge on the second choice,
+// or a big enough edge on his own.
 const keyWinner = (race) => {
   const rk = race.ranked;
-  return isKeyRace(race) || (rk.length > 1 && rk[0].win_prob >= 0.28 && rk[0].win_prob >= 1.8 * rk[1].win_prob);
+  if (rk.length < 2) return false;
+  const p1 = rk[0].win_prob, ratio = p1 / rk[1].win_prob;
+  return (race.confidence >= 4 && p1 >= 0.22 && ratio >= 1.35) || (p1 >= 0.26 && ratio >= 1.45);
 };
 
 // number of distinct tickets a set of legs covers (each finisher must be a different horse)
@@ -399,23 +406,38 @@ function marketProbs(ranked) {
   if (known.length < Math.max(2, ranked.length - 1)) return null;
   const fill = known.length < raw.length ? Math.min(...known) * 0.6 : 0;
   const tot = raw.reduce((a, x) => a + (x ?? fill), 0);
-  return raw.map((x) => (x ?? fill) / tot);
+  return { probs: raw.map((x) => (x ?? fill) / tot), overround: tot };
 }
 
+// Standard morning-line odds ladder (odds-to-1)
+const LADDER = [[1, 9], [1, 5], [2, 5], [1, 2], [3, 5], [4, 5], [1, 1], [6, 5], [7, 5], [3, 2], [8, 5], [9, 5], [2, 1], [5, 2], [3, 1],
+  [7, 2], [4, 1], [9, 2], [5, 1], [6, 1], [7, 1], [8, 1], [10, 1], [12, 1], [15, 1], [20, 1], [30, 1], [50, 1], [99, 1]];
+export function toLine(dec) {
+  let best = LADDER[0], bd = Infinity;
+  for (const [a, b] of LADDER) { const d = Math.abs(Math.log((a / b) + 1) - Math.log(dec + 1)); if (d < bd) { bd = d; best = [a, b]; } }
+  return { dec: best[0] / best[1], text: `${best[0]}-${best[1]}` };
+}
+
+// Our line: the numbers' win chances written as a morning line (same track take as this race's ML),
+// so it reads like the program: 10-1 on the ML vs 5-1 on our line = good value.
 function valueCall(race) {
   const rk = race.ranked;
-  const q = marketProbs(rk);
-  for (const h of rk) { h.ml_prob = null; h.edge = null; h.value = null; h.ml_rank = null; }
-  if (!q) return { good: [], bad: [] };
-  rk.forEach((h, i) => { h.ml_prob = q[i]; h.edge = h.win_prob / q[i]; });
-  // morning-line rank: 1 = public's favorite (ties share the better rank)
-  for (const h of rk) h.ml_rank = h.ml_dec == null ? null : 1 + rk.filter((x) => x.ml_dec != null && x.ml_dec < h.ml_dec).length;
-  // Good value: the numbers rate him at least 2 spots better than the morning line does, at 4/1 or higher.
-  const good = rk.filter((h) => h.ml_rank != null && h.ml_rank - h.rank >= 2 && h.ml_dec >= 4 && h.win_prob >= 0.07 && h.edge >= 1.3)
-    .sort((a, b) => (b.ml_rank - b.rank) - (a.ml_rank - a.rank) || b.edge - a.edge).slice(0, 3);
-  // Bad value: one of the morning-line top 3 that the numbers rate at least 2 spots worse.
-  const bad = rk.filter((h) => h.ml_rank != null && h.ml_rank <= 3 && h.rank - h.ml_rank >= 2 && h.edge <= 0.8)
-    .sort((a, b) => (b.rank - b.ml_rank) - (a.rank - a.ml_rank) || a.edge - b.edge).slice(0, 2);
+  const mk = marketProbs(rk);
+  const OR = mk ? Math.max(1.0, mk.overround) : 1.2;
+  for (const h of rk) {
+    const ln = toLine(1 / (h.win_prob * OR) - 1);
+    h.line_dec = ln.dec; h.line = ln.text;
+    h.ml_prob = null; h.value = null; h.value_ratio = null;
+  }
+  if (!mk) return { good: [], bad: [] };
+  rk.forEach((h, i) => { h.ml_prob = mk.probs[i]; });
+  const has = (h) => h.ml_dec != null;
+  // good: ML at least 1.75× our line and 2+ points longer (e.g. ML 10-1, our line 5-1)
+  const good = rk.filter((h) => has(h) && h.ml_dec >= 1.75 * h.line_dec && h.ml_dec - h.line_dec >= 2)
+    .map((h) => ((h.value_ratio = h.ml_dec / h.line_dec), h)).sort((a, b) => b.value_ratio - a.value_ratio).slice(0, 3);
+  // bad: our line at least 1.75× the ML and 2+ points longer, on horses 8-1 or shorter (e.g. ML 5-1, our line 10-1)
+  const bad = rk.filter((h) => has(h) && h.ml_dec <= 8 && h.line_dec >= 1.75 * h.ml_dec && h.line_dec - h.ml_dec >= 2)
+    .map((h) => ((h.value_ratio = h.line_dec / h.ml_dec), h)).sort((a, b) => b.value_ratio - a.value_ratio).slice(0, 2);
   for (const h of good) h.value = 'good';
   for (const h of bad) h.value = 'bad';
   return { good: good.map((h) => h.pgm), bad: bad.map((h) => h.pgm) };
@@ -430,7 +452,9 @@ function longshotCall(race) {
   const idx = rk.map((h, i) => i);
   // longshot pool: good-value horses, else live prices the numbers like better than the morning line
   let pool = idx.filter((i) => rk[i].value === 'good');
-  if (!pool.length) pool = idx.filter((i) => rk[i].ml_dec >= 6 && rk[i].ml_rank - rk[i].rank >= 1 && rk[i].win_prob >= 0.05);
+  if (!pool.length) pool = idx.filter((i) => rk[i].ml_dec >= 6 && rk[i].ml_dec >= 1.4 * rk[i].line_dec && rk[i].win_prob >= 0.05);
+  if (!pool.length) pool = idx.filter((i) => i > 0 && rk[i].ml_dec >= 4 && rk[i].ml_dec >= 1.15 * rk[i].line_dec && rk[i].win_prob >= 0.08)
+    .sort((x, y) => (rk[y].ml_dec / rk[y].line_dec) - (rk[x].ml_dec / rk[x].line_dec)).slice(0, 1);
   if (!pool.length) return [];
   const inPool = (i) => pool.includes(i);
   const mainLegs = race.trifecta.legs ? race.trifecta.legs.map((l) => l.map((p) => rk.findIndex((h) => h.pgm === p))) : null;
@@ -438,7 +462,7 @@ function longshotCall(race) {
   const used = new Set();
   const out = [];
   const key3 = (a, b, c) => `${a}.${b}.${c}`;
-  const addTicket = (idxLegs, label) => {
+  const addTicket = (idxLegs, label, kindName) => {
     let p = 0, m = 0, combos = 0;
     const walk = (i, u) => {
       if (i === 3) { p += s.tri(u[0], u[1], u[2]); m += hv(u[0], u[1], u[2]); combos++; used.add(key3(...u)); return; }
@@ -446,14 +470,14 @@ function longshotCall(race) {
     };
     walk(0, []);
     const legs = idxLegs.map((l) => l.map((i) => rk[i].pgm));
-    out.push({ legs, text: legsText(legs), combos, cost: combos * base, base, hit: p, market: m, overlay: m ? p / m : null, label,
+    out.push({ legs, text: legsText(legs), combos, cost: combos * base, base, hit: p, market: m, overlay: m ? p / m : null, label, kind: kindName,
       value: [...new Set(idxLegs.flat())].filter(inPool).map((i) => rk[i].pgm) });
   };
   // 1) keyed ticket around the best value horse
   const v = pool[0];
   const [a, b] = idx.filter((i) => i !== v).slice(0, 2);
-  if (rk[v].win_prob >= 0.10) addTicket([[v], [a, b], [a, b]], `#${rk[v].pgm} on top`);
-  else addTicket([[a, b], [a, b], [v]], `#${rk[v].pgm} to run third`);
+  if (rk[v].win_prob >= 0.10) addTicket([[v], [a, b], [a, b]], `#${rk[v].pgm} on top`, 'top');
+  else addTicket([[a, b], [a, b], [v]], `#${rk[v].pgm} to run third`, 'third');
   // 2-3) best-overlay straight tickets that use a value horse and would pay well
   const cands = [];
   for (let x = 0; x < k; x++) for (let y = 0; y < k; y++) for (let z = 0; z < k; z++) {
@@ -474,12 +498,12 @@ function longshotCall(race) {
     const spot = [t.x, t.y, t.z].findIndex(inPool);       // vary where the value horse finishes
     if (spots.has(spot) && cands.some((c) => !used.has(key3(c.x, c.y, c.z)) && !spots.has([c.x, c.y, c.z].findIndex(inPool)) && c.ov >= t.ov * 0.75)) continue;
     spots.add(spot);
-    addTicket([[t.x], [t.y], [t.z]], 'straight');
+    addTicket([[t.x], [t.y], [t.z]], 'straight', 'straight');
   }
   // a second value horse gets its own keyed ticket if there's room
   if (out.length < 3 && pool.length > 1) {
     const v2 = pool[1]; const [c, d] = idx.filter((i) => i !== v2).slice(0, 2);
-    addTicket(rk[v2].win_prob >= 0.10 ? [[v2], [c, d], [c, d]] : [[c, d], [c, d], [v2]], rk[v2].win_prob >= 0.10 ? `#${rk[v2].pgm} on top` : `#${rk[v2].pgm} to run third`);
+    addTicket(rk[v2].win_prob >= 0.10 ? [[v2], [c, d], [c, d]] : [[c, d], [c, d], [v2]], rk[v2].win_prob >= 0.10 ? `#${rk[v2].pgm} on top` : `#${rk[v2].pgm} to run third`, rk[v2].win_prob >= 0.10 ? 'top' : 'third');
   }
   return out.slice(0, 3);
 }
@@ -504,20 +528,48 @@ export function multiRaceBets(card) {
   return out.sort((a, b) => a.races[0] - b.races[0] || a.races.length - b.races.length);
 }
 
-// Suggested horses for one leg of a multi-race ticket.
-export function legSuggestion(race, style = 'balanced') {
-  const rk = race.ranked;
-  const target = { tight: 0.45, balanced: 0.6, wide: 0.75 }[style] ?? 0.6;
-  const maxN = { tight: 3, balanced: 4, wide: 5 }[style] ?? 4;
-  if (!rk.length) return [];
-  if ((race.confidence >= 5 && rk[0].win_prob >= 0.35) || rk[0].win_prob >= target) return [rk[0].pgm];
-  const pick = [];
-  let cov = 0;
-  for (const h of rk) {
-    pick.push(h.pgm); cov += h.win_prob;
-    if (cov >= target || pick.length >= maxN) break;
+// Build a multi-race ticket under a budget: start with the top pick in every leg, then keep adding the
+// horse that raises the hit chance most per extra dollar until the next one won't fit.
+const PICK_MIN_HIT = { 2: 0.14, 3: 0.08, 4: 0.05, 5: 0.03, 6: 0.02 };
+export function buildMultiTicket(races, base, budget, fixed = {}) {
+  const legs = races.map((r) => {
+    const cand = r.ranked.filter((h) => h.win_prob > 0);
+    const fx = fixed[r.number] && fixed[r.number].filter((p) => cand.some((h) => h.pgm === p));
+    return { r, cand, sel: fx && fx.length ? cand.filter((h) => fx.includes(h.pgm)) : [cand[0]], locked: !!(fx && fx.length) };
+  });
+  const cover = (l) => l.sel.reduce((a, h) => a + h.win_prob, 0);
+  const combos = () => legs.reduce((a, l) => a * l.sel.length, 1);
+  for (;;) {
+    let best = null, bestScore = 0;
+    const c = combos();
+    for (const l of legs) {
+      if (l.locked) continue;
+      const nxt = l.cand.find((h) => !l.sel.includes(h));
+      if (!nxt || cover(l) >= 0.85) continue;
+      const newCost = (c / l.sel.length) * (l.sel.length + 1) * base;
+      if (newCost > budget + 1e-9) continue;
+      const gain = Math.log((cover(l) + nxt.win_prob) / cover(l));
+      const costUp = Math.log((l.sel.length + 1) / l.sel.length);
+      const sc = gain / costUp;
+      if (sc > bestScore) { bestScore = sc; best = [l, nxt]; }
+    }
+    if (!best || bestScore < 0.12) break;
+    best[0].sel.push(best[1]);
   }
-  return pick;
+  const hit = legs.reduce((a, l) => a * cover(l), 1);
+  const mkt = legs.every((l) => l.sel.every((h) => h.ml_prob != null)) ? legs.reduce((a, l) => a * l.sel.reduce((x, h) => x + h.ml_prob, 0), 1) : null;
+  const valueLegs = legs.filter((l) => l.sel.length <= 2 && l.sel.some((h) => h.value === 'good')).map((l) => l.r.number);
+  const n = races.length;
+  const minHit = PICK_MIN_HIT[n] ?? 0.03;
+  const overlay = mkt ? hit / mkt : null;
+  const cost = combos() * base;
+  let verdict = 'PASS', why;
+  if (!valueLegs.length) why = 'no good-value horse to build it around';
+  else if (hit < minHit) why = `too spread out to cover well for $${budget} (${(hit * 100).toFixed(1)}% hit chance)`;
+  else if (overlay != null && overlay < 1.3) why = 'the morning line already rates these horses about the same';
+  else { verdict = 'PLAY'; why = `built around value in race${valueLegs.length > 1 ? 's' : ''} ${valueLegs.join(', ')}`; }
+  return { legs: legs.map((l) => ({ n: l.r.number, sel: l.sel.map((h) => h.pgm), cover: cover(l), locked: l.locked })),
+    combos: combos(), cost, hit, mkt, overlay, valueLegs, verdict, why, minHit };
 }
 
 export const FEATURE_VERSION = 1;
@@ -601,7 +653,7 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
     h.comp = Object.fromEntries(Object.keys(W).map((k) => [k, comp[k] ? comp[k][i] : 0]));
   });
   const ranked = [...hs].sort((a, b) => b.score - a.score);
-  const ex = ranked.map((h) => Math.exp(h.score / 22.0));
+  const ex = ranked.map((h) => Math.exp(h.score / TEMP));
   const tot = ex.reduce((a, b) => a + b, 0);
   ranked.forEach((h, i) => { h.win_prob = ex[i] / tot; h.fair_odds = 1 / h.win_prob - 1; h.rank = i + 1; });
   race.ranked = ranked;

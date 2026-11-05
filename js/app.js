@@ -2,7 +2,7 @@ import * as pdfjsLib from '../vendor/pdf.min.mjs';
 import { parseProgram, fmtTime } from './parse.js';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
-  multiRaceBets, legSuggestion, linearScore, legsHit, legsText,
+  multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
 } from './engine.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
@@ -22,7 +22,7 @@ const S = {
   key: null, base: null, card: null, st: null,
   mult: { ...DEFAULT_MULT, ...LS.get(MULT_KEY, {}) },
   tuneOpen: false, dirty: false, shared: null, pasted: null, suggestion: null,
-  prefs: { sort: 'pgm', view: 'auto', pickStyle: 'balanced', shareName: '', ...LS.get(PREF_KEY, {}) },
+  prefs: { sort: 'pgm', view: 'auto', pickBudget: 5, shareName: '', emailTo: '', ...LS.get(PREF_KEY, {}) },
   driverTable: [], today: null, year: null, bets: [],
 };
 
@@ -165,8 +165,9 @@ function snapshot(r) {
     v: 2,
     order: r.ranked.map((h) => h.pgm), conf: r.confidence, under: r.undercard,
     plays: { exacta: playOf(r.exacta), trifecta: playOf(r.trifecta), superfecta: playOf(r.superfecta) },
-    longshots: (r.longshots || []).map((l) => ({ legs: l.legs, text: l.text, cost: l.cost })),
+    longshots: (r.longshots || []).map((l) => ({ legs: l.legs, text: l.text, cost: l.cost, kind: l.kind })),
     value: { good: [...(r.value?.good || [])], bad: [...(r.value?.bad || [])] },
+    vdet: r.ranked.filter((h) => h.value).map((h) => [h.pgm, h.value, h.ml_prob ?? null, h.win_prob, h.ml, h.line]),
     feat: r.ranked.map((h) => [h.pgm, h.feat]),
   };
 }
@@ -196,11 +197,15 @@ function gradeRace(snap, fin) {
     row[k] = pl.type === 'PASS' || pl.type === 'N/A' ? null : pl.legs ? legsHit(pl.legs, fin) : oldPlayHit(k, pl, o, fin);
     row[k + '_cost'] = row[k] == null ? 0 : pl.cost;
   }
-  row.ls = (snap.longshots || []).map((l) => legsHit(l.legs, fin)).filter((x) => x != null);
-  row.ls_cost = (snap.longshots || []).reduce((a, l) => a + (l.cost || 0), 0);
+  const lsKind = (l) => l.kind || (/on top/.test(l.text) || /^\d+ \//.test(l.text) ? 'top' : /\/ \d+$/.test(l.text) ? 'third' : 'straight');
+  row.lsT = (snap.longshots || []).map((l) => ({ kind: lsKind(l), text: l.text, cost: l.cost || 0, hit: legsHit(l.legs, fin) })).filter((x) => x.hit != null);
+  row.ls = row.lsT.map((x) => x.hit);
+  row.ls_cost = row.lsT.reduce((a, x) => a + x.cost, 0);
   const v = snap.value || { good: [], bad: [] };
   row.good = v.good.length; row.good_w = v.good.filter((p) => p === fin[0]).length; row.good_itm = v.good.filter((p) => fin.slice(0, 3).includes(p)).length;
   row.bad = v.bad.length; row.bad_w = v.bad.filter((p) => p === fin[0]).length; row.bad_itm = v.bad.filter((p) => fin.slice(0, 3).includes(p)).length;
+  const exp = (k) => (snap.vdet || []).filter((d) => d[1] === k && d[2] != null).reduce((a, d) => a + d[2], 0);
+  row.good_mlexp = exp('good'); row.bad_mlexp = exp('bad');
   return row;
 }
 function gradedRows(st) {
@@ -265,7 +270,7 @@ function renderCard() {
   return `
   <div class="cardhead">
     <div><h1>${esc(c.track)}</h1><div class="sub">${esc(c.date)} · ${c.races.length} races${nScr ? ` · ${nScr} scratched` : ''} · ${weightsBadge()}</div></div>
-    <div class="row"><button class="btn small primary" data-act="pdf">Download PDF</button><button class="btn small" data-act="print">Print</button>
+    <div class="row"><button class="btn small primary" data-act="email">Email PDF</button><button class="btn small" data-act="pdf">Download PDF</button><button class="btn small" data-act="print">Print</button>
       ${S.bets.length ? '<a class="btn small" href="#/picks">Pick 3/4/5 tickets</a>' : ''}<a class="btn small" href="#/results">Enter results</a><button class="btn small" data-act="new">Load another program</button></div>
   </div>
   <div class="bestbets"><b>Best bets:</b> ${best.map((r) => `<a href="#/race/${r.number}"><b>R${r.number}</b> #${r.ranked[0].pgm} ${esc(tc(r.ranked[0].name))}</a> (${r.confidence}/5)`).join(' &nbsp;·&nbsp; ')}</div>
@@ -342,7 +347,7 @@ function horseCard(h, r, scr, hl) {
       <div style="min-width:0"><div class="h-name">${esc(tc(h.name))} ${scr ? '' : valueTag(h)}</div>
         <div class="h-sub">${esc(tc(h.driver))}${h.drv_w != null ? ` (${h.drv_w}%)` : ''} · ${esc(tc(h.trainer))}${h.trn_w != null ? ` (${h.trn_w}%)` : ''}</div>
         <div class="h-extra">${esc(extraLine(h))}</div></div>
-      <div class="h-right">${proj}<div class="h-ml">ML ${esc(h.ml)}${!scr && h.fair_odds != null ? ` · fair ${oddsStr(h.fair_odds)}` : ''}</div></div>
+      <div class="h-right">${proj}<div class="h-ml">ML ${esc(h.ml)}${!scr && h.line ? ` · line ${esc(h.line)}` : ''}</div></div>
     </div>
     ${scr || !h.m ? '' : `<div class="h-stats">${statCells(h, hl).map(([k, v, s]) => `<div class="st"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('')}</div>
     <div class="pc">${pcList(h.pros, 'pro')}${pcList(h.cons, 'con')}</div>`}
@@ -393,7 +398,7 @@ function projHtml(r) {
   const labels = ['WIN', '2ND', '3RD', '4TH', '5TH'];
   return `<div class="proj">${r.ranked.slice(0, 5).map((h, i) => `<div class="p ${i === 0 ? 'win' : i < 3 ? 't3' : ''}">
       <div class="lbl">${labels[i]}</div><div class="nm">#${h.pgm} ${esc(tc(h.name))}</div>
-      <div class="od">ML ${esc(h.ml)} · model ${Math.round(h.win_prob * 100)}% (fair ${oddsStr(h.fair_odds)})${h.value === 'good' ? ' · <b class="gv">GOOD VALUE</b>' : h.value === 'bad' ? ' · <b class="bv">BAD VALUE</b>' : ''}</div></div>`).join('')}</div>`;
+      <div class="od">ML ${esc(h.ml)} · our line ${esc(h.line)} · ${Math.round(h.win_prob * 100)}%${h.value === 'good' ? ' · <b class="gv">GOOD VALUE</b>' : h.value === 'bad' ? ' · <b class="bv">BAD VALUE</b>' : ''}</div></div>`).join('')}</div>`;
 }
 
 function triTile(r) {
@@ -409,12 +414,12 @@ function triTile(r) {
 function valueTile(r) {
   const line = (p, good) => {
     const h = horseOf(r, p);
-    return `<li class="${good ? 'g' : 'r'}"><b>#${h.pgm} ${esc(tc(h.name))}</b> ML ${esc(h.ml)} <span class="faint">(${ord(h.ml_rank)} choice)</span> · numbers rank him <b>${ord(h.rank)}</b> · fair ${oddsStr(h.fair_odds)}</li>`;
+    return `<li class="${good ? 'g' : 'r'}"><b>#${h.pgm} ${esc(tc(h.name))}</b> ML <b>${esc(h.ml.replace('/', '-'))}</b> · our line <b>${esc(h.line)}</b> <span class="faint">· ranked ${ord(h.rank)}</span></li>`;
   };
   const g = r.value.good, b = r.value.bad;
   return `<div class="bet valuebox"><div class="lbl">VALUE vs MORNING LINE</div>
     ${g.length || b.length ? `<ul>${g.map((p) => line(p, true)).join('')}${b.map((p) => line(p, false)).join('')}</ul>
-      <div class="det"><span class="gv">Good</span> = longer odds than the numbers say · <span class="bv">Bad</span> = shorter odds than the numbers say</div>`
+      <div class="det"><span class="gv">Good</span> = morning line much longer than our line · <span class="bv">Bad</span> = morning line much shorter than our line</div>`
     : '<div class="det">No big gaps between the numbers and the morning line in this race.</div>'}</div>`;
 }
 function longTile(r) {
@@ -475,47 +480,59 @@ function raceBodyHtml(r) {
 }
 
 // ---------------- multi-race tickets ----------------
-const STYLES = { tight: 'Tight', balanced: 'Balanced', wide: 'Wide' };
-function ticketFor(b) {
+const HARD_CAP = 10;
+const budgetNow = () => (S.prefs.pickBudget === 10 ? 10 : 5);
+function ticketFor(b, budget = budgetNow()) {
   const ps = S.st.picks[b.id] || {};
-  const style = S.prefs.pickStyle;
-  const legs = b.races.map((n) => {
-    const r = raceOf(n);
-    const scr = new Set(S.st.scratches[n] || []);
-    let sel = (ps.legs && ps.legs[n]) || null;
-    const custom = !!sel;
-    sel = (sel || legSuggestion(r, style)).filter((p) => !scr.has(p) && r.horses.some((h) => h.pgm === p));
-    if (!sel.length) sel = legSuggestion(r, style);
-    const cover = sel.reduce((a, p) => a + (r.ranked.find((h) => h.pgm === p)?.win_prob || 0), 0);
-    return { n, r, sel, custom, cover };
-  });
-  const combos = legs.reduce((a, l) => a * l.sel.length, 1);
+  const races = b.races.map((n) => raceOf(n));
+  const fixed = {};
+  for (const r of races) {
+    const scr = new Set(S.st.scratches[r.number] || []);
+    const sel = ps.legs && ps.legs[r.number] && ps.legs[r.number].filter((p) => !scr.has(p));
+    if (sel && sel.length) fixed[r.number] = sel;
+  }
   const base = ps.base ?? b.base;
-  const hit = legs.reduce((a, l) => a * l.cover, 1);
+  const t = buildMultiTicket(races, base, budget, fixed);
+  const legs = t.legs.map((l) => ({ ...l, r: raceOf(l.n), custom: !!fixed[l.n] }));
   const fins = legs.map((l) => (S.st.results[l.n] || [])[0]);
   const graded = fins.every(Boolean) ? legs.every((l, i) => l.sel.includes(+fins[i])) : null;
-  return { b, legs, combos, base, cost: combos * base, hit, graded };
+  const edited = Object.keys(fixed).length > 0;
+  return { ...t, b, legs, base, budget, graded, edited, over: t.cost > HARD_CAP + 1e-9 };
+}
+// The suggestion for the card: the $5 ticket, or the $10 version when only the bigger one is worth playing.
+function pickPlan(b) {
+  const t5 = ticketFor(b, 5);
+  if (t5.edited) return { t: ticketFor(b, budgetNow()), alt: null };
+  if (budgetNow() === 10) return { t: ticketFor(b, 10), alt: null };
+  if (t5.verdict === 'PLAY') return { t: t5, alt: null };
+  const t10 = ticketFor(b, 10);
+  return { t: t5, alt: t10.verdict === 'PLAY' && t10.cost > t5.cost ? t10 : null };
 }
 function ticketLine(t) {
   return t.legs.map((l) => l.sel.join(',')).join(' / ');
 }
+function verdictPill(t) {
+  return t.verdict === 'PLAY' ? '<span class="pill value">PLAY</span>' : '<span class="pill pass">PASS</span>';
+}
 function renderPicks() {
   if (!S.bets.length) return `<div class="cardhead"><div><h1>Pick 3/4/5 tickets</h1><div class="sub">This program doesn't list any multi-race wagers.</div></div></div>`;
-  const style = S.prefs.pickStyle;
-  return `<div class="cardhead"><div><h1>Multi-race tickets</h1><div class="sub">${esc(S.card.track)} · ${esc(S.card.date)} · Singles in the strong races, more horses in the weak ones. Tap a horse to add or drop it.</div></div>
-    <div class="seg" role="group" aria-label="Ticket style">${Object.entries(STYLES).map(([k, l]) => `<button data-pstyle="${k}" class="${style === k ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+  const bud = budgetNow();
+  return `<div class="cardhead"><div><h1>Multi-race tickets</h1><div class="sub">${esc(S.card.track)} · ${esc(S.card.date)} · Built to stay at or under your budget. Only marked <b>PLAY</b> when there's a good-value horse to build around and a real chance to hit. Tap a horse to lock in your own leg.</div></div>
+    <div class="seg" role="group" aria-label="Budget"><button data-pbudget="5" class="${bud === 5 ? 'on' : ''}">$5 target</button><button data-pbudget="10" class="${bud === 10 ? 'on' : ''}">Up to $10</button></div></div>
   ${S.bets.map((b) => {
-    const t = ticketFor(b);
-    return `<div class="panel ticket">
-      <div class="t-head"><h3>${esc(b.name)} · Races ${b.races[0]}–${b.races[b.races.length - 1]}</h3>
-        <div class="t-sum"><b>${ticketLine(t)}</b><br>${t.combos} combo${t.combos > 1 ? 's' : ''} × <select data-pbase="${b.id}">${[0.1, 0.2, 0.5, 1, 2].map((x) => `<option value="${x}" ${x === t.base ? 'selected' : ''}>${baseLabel(x)}</option>`).join('')}</select> = <b>${dollars(t.cost)}</b> · model hit ~${pctP(t.hit, t.hit < 0.1 ? 1 : 0)}
+    const { t, alt } = pickPlan(b);
+    return `<div class="panel ticket ${t.verdict === 'PLAY' ? 'play' : ''}">
+      <div class="t-head"><h3>${verdictPill(t)} ${esc(b.name)} · Races ${b.races[0]}–${b.races[b.races.length - 1]}</h3>
+        <div class="t-sum"><b>${ticketLine(t)}</b><br>${t.combos} combo${t.combos > 1 ? 's' : ''} × <select data-pbase="${b.id}" aria-label="Base bet">${[0.1, 0.2, 0.5, 1, 2].map((x) => `<option value="${x}" ${x === t.base ? 'selected' : ''}>${baseLabel(x)}</option>`).join('')}</select> = <b class="${t.over ? 'no' : ''}">${dollars(t.cost)}</b> · model hit ~${pctP(t.hit, t.hit < 0.1 ? 1 : 0)}
         ${t.graded == null ? '' : t.graded ? ' · <span class="ok">HIT</span>' : ' · <span class="no">missed</span>'}</div></div>
-      ${t.legs.map((l) => `<div class="leg"><div class="leg-h"><a href="#/race/${l.n}"><b>R${l.n}</b></a> <span class="stars">${stars(l.r.confidence)}</span> <span class="muted">${l.sel.length === 1 ? 'single' : l.sel.length + ' horses'} · covers ${Math.round(l.cover * 100)}%${l.custom ? ' · edited' : ''}</span></div>
-        <div class="chips">${l.r.ranked.map((h) => `<button class="chip ${l.sel.includes(h.pgm) ? 'on' : ''} ${h.value === 'good' ? 'gvc' : ''}" data-pick="${b.id}|${l.n}|${h.pgm}" aria-pressed="${l.sel.includes(h.pgm)}">#${h.pgm} <small>${Math.round(h.win_prob * 100)}%</small></button>`).join('')}</div></div>`).join('')}
-      <div class="row" style="margin-top:8px"><button class="btn small" data-preset-ticket="${b.id}">Back to suggested</button></div>
+      <div class="why-line">${t.verdict === 'PLAY' ? 'Play' : 'Pass'}: ${esc(t.why)}.${t.over ? ' <b class="no">Over your $10 limit — drop a horse.</b>' : ''}</div>
+      ${alt ? `<div class="alt">At $10 it's a play: <b>${ticketLine(alt)}</b> — ${alt.combos} combos = ${dollars(alt.cost)}, model hit ~${pctP(alt.hit, 1)} (${esc(alt.why)}).</div>` : ''}
+      ${t.legs.map((l) => `<div class="leg"><div class="leg-h"><a href="#/race/${l.n}"><b>R${l.n}</b></a> <span class="stars">${stars(l.r.confidence)}</span> <span class="muted">${l.sel.length === 1 ? 'single' : l.sel.length + ' horses'} · covers ${Math.round(l.cover * 100)}%${l.custom ? ' · locked by you' : ''}</span></div>
+        <div class="chips">${l.r.ranked.map((h) => `<button class="chip ${l.sel.includes(h.pgm) ? 'on' : ''} ${h.value === 'good' ? 'gvc' : ''}" data-pick="${b.id}|${l.n}|${h.pgm}" aria-pressed="${l.sel.includes(h.pgm)}">#${h.pgm} <small>${Math.round(h.win_prob * 100)}% · ${esc(h.ml)}</small></button>`).join('')}</div></div>`).join('')}
+      ${t.edited ? `<div class="row" style="margin-top:8px"><button class="btn small" data-preset-ticket="${b.id}">Back to suggested</button></div>` : ''}
     </div>`;
   }).join('')}
-  <p class="note">Chips are in projected order with each horse's model win %. Green-outlined chips are good-value horses. Covers = the model's combined win chance for the horses you're using in that leg.</p>`;
+  <p class="note">Chips are in projected order with model win % and morning line. Green-outlined = good value. Covers = the model's combined win chance for the horses in that leg. Legs you lock stay as you set them; the rest fill in within the budget.</p>`;
 }
 
 // ---------------- results paste-in ----------------
@@ -602,24 +619,36 @@ function summarize(rows) {
     const g = rows.filter((x) => x[k] != null);
     plays[k] = { n: g.length, hit: g.filter((x) => x[k]).length, cost: g.reduce((a, x) => a + x[k + '_cost'], 0) };
   }
-  plays.longshots = { n: rows.reduce((a, x) => a + x.ls.length, 0), hit: rows.reduce((a, x) => a + x.ls.filter(Boolean).length, 0), cost: rows.reduce((a, x) => a + (x.ls.length ? x.ls_cost : 0), 0) };
+  const ls = {};
+  for (const kind of ['top', 'third', 'straight']) {
+    const t = rows.flatMap((x) => (x.lsT || []).filter((y) => y.kind === kind));
+    ls[kind] = { n: t.length, hit: t.filter((y) => y.hit).length, cost: t.reduce((a, y) => a + y.cost, 0) };
+  }
+  const sum = (k) => rows.reduce((a, x) => a + (x[k] || 0), 0);
   const val = {
-    good: { n: rows.reduce((a, x) => a + (x.good || 0), 0), w: rows.reduce((a, x) => a + (x.good_w || 0), 0), itm: rows.reduce((a, x) => a + (x.good_itm || 0), 0) },
-    bad: { n: rows.reduce((a, x) => a + (x.bad || 0), 0), w: rows.reduce((a, x) => a + (x.bad_w || 0), 0), itm: rows.reduce((a, x) => a + (x.bad_itm || 0), 0) },
+    good: { n: sum('good'), w: sum('good_w'), itm: sum('good_itm'), mlexp: sum('good_mlexp') },
+    bad: { n: sum('bad'), w: sum('bad_w'), itm: sum('bad_itm'), mlexp: sum('bad_mlexp') },
   };
-  return { by, plays, val, n: rows.length, w: rows.filter((x) => x.win).length };
+  return { by, plays, ls, val, n: rows.length, w: rows.filter((x) => x.win).length };
 }
-function recordTables(sum) {
+const LS_LABEL = { top: 'Value horse on top', third: 'Value horse to run 3rd', straight: 'Straight tickets' };
+function recordTables(sum, rows) {
   const conf = Object.entries(sum.by).sort((a, b) => b[0] - a[0]).map(([c, v]) => `<tr><td><span class="stars">${stars(+c)}</span> ${c}/5</td><td>${v.w}/${v.n}</td><td>${Math.round((100 * v.w) / v.n)}%</td><td>${v.itm}/${v.n}</td></tr>`).join('');
-  const label = { exacta: 'Exacta', trifecta: 'Trifecta', superfecta: 'Superfecta', longshots: 'Longshot tris' };
+  const label = { exacta: 'Exacta', trifecta: 'Trifecta', superfecta: 'Superfecta' };
   const plays = Object.entries(sum.plays).map(([k, v]) => `<tr><td>${label[k]}</td><td>${v.hit}/${v.n}</td><td>${v.n ? Math.round((100 * v.hit) / v.n) + '%' : '—'}</td><td>${dollars(v.cost)}</td></tr>`).join('');
-  const vr = (lbl, v, cls) => `<tr><td><span class="${cls}">${lbl}</span></td><td>${v.n}</td><td>${v.w} (${v.n ? Math.round((100 * v.w) / v.n) : 0}%)</td><td>${v.itm} (${v.n ? Math.round((100 * v.itm) / v.n) : 0}%)</td></tr>`;
+  const lsAll = Object.values(sum.ls).reduce((a, v) => ({ n: a.n + v.n, hit: a.hit + v.hit, cost: a.cost + v.cost }), { n: 0, hit: 0, cost: 0 });
+  const lsRows = Object.entries(sum.ls).map(([k, v]) => `<tr><td>${LS_LABEL[k]}</td><td>${v.hit}/${v.n}</td><td>${v.n ? Math.round((100 * v.hit) / v.n) + '%' : '—'}</td><td>${dollars(v.cost)}</td></tr>`).join('')
+    + `<tr class="tot"><td>All longshot tris</td><td>${lsAll.hit}/${lsAll.n}</td><td>${lsAll.n ? Math.round((100 * lsAll.hit) / lsAll.n) + '%' : '—'}</td><td>${dollars(lsAll.cost)}</td></tr>`;
+  const vr = (lbl, v, cls) => `<tr><td><span class="${cls}">${lbl}</span></td><td>${v.n}</td><td>${v.w}</td><td>${v.mlexp ? v.mlexp.toFixed(1) : '—'}</td><td>${v.itm} (${v.n ? Math.round((100 * v.itm) / v.n) : 0}%)</td></tr>`;
+  const tix = (rows || []).flatMap((x) => (x.lsT || []).map((y) => ({ race: x.race, ...y })));
   return `<div class="grid2">
     <div class="panel"><h3>Winners by confidence</h3><table class="rec"><thead><tr><th>Confidence</th><th>Won</th><th>Win %</th><th>In the money</th></tr></thead><tbody>${conf || '<tr><td colspan="4" class="muted">No graded races yet</td></tr>'}</tbody></table></div>
-    <div class="panel"><h3>Plays</h3><table class="rec"><thead><tr><th>Bet</th><th>Hit</th><th>Hit %</th><th>Wagered</th></tr></thead><tbody>${plays}</tbody></table>
+    <div class="panel"><h3>Main plays</h3><table class="rec"><thead><tr><th>Bet</th><th>Hit</th><th>Hit %</th><th>Wagered</th></tr></thead><tbody>${plays}</tbody></table>
       <p class="note">Wagered is at the program's base amount. Payouts aren't tracked.</p></div>
-    <div class="panel"><h3>Value horses</h3><table class="rec"><thead><tr><th>Flag</th><th>Horses</th><th>Won</th><th>In the money</th></tr></thead><tbody>${vr('Good value', sum.val.good, 'gv')}${vr('Bad value', sum.val.bad, 'bv')}</tbody></table>
-      <p class="note">If good-value horses win more than their morning lines suggest, the value calls are working.</p></div></div>`;
+    <div class="panel"><h3>Longshot trifectas</h3><table class="rec"><thead><tr><th>Type</th><th>Hit</th><th>Hit %</th><th>Wagered</th></tr></thead><tbody>${lsRows}</tbody></table>
+      ${tix.length ? `<details><summary class="note">Every graded longshot ticket (${tix.length})</summary><table class="rec small"><tbody>${tix.map((y) => `<tr><td>R${y.race}</td><td><b>${esc(y.text)}</b></td><td class="muted">${LS_LABEL[y.kind]}</td><td>${dollars(y.cost)}</td><td>${y.hit ? '<span class="ok">hit</span>' : '<span class="no">miss</span>'}</td></tr>`).join('')}</tbody></table></details>` : ''}</div>
+    <div class="panel"><h3>Value horses</h3><table class="rec"><thead><tr><th>Flag</th><th>Horses</th><th>Won</th><th>ML says</th><th>In the money</th></tr></thead><tbody>${vr('Good value', sum.val.good, 'gv')}${vr('Bad value', sum.val.bad, 'bv')}</tbody></table>
+      <p class="note"><b>ML says</b> = how many wins the morning line expects from those horses. Good value is working when <b>Won</b> beats it; bad value is working when <b>Won</b> falls short of it.</p></div></div>`;
 }
 function renderRecord() {
   const cur = S.key ? gradedRows(S.st) : [];
@@ -629,13 +658,13 @@ function renderRecord() {
     const rows = gradedRows(st);
     if (rows.length) { all.push(...rows); per.push([cards[k] || { track: k.split('|')[0], date: k.split('|')[1] || '' }, rows, st]); }
   }
-  const tickets = S.key ? S.bets.map(ticketFor).filter((t) => t.graded != null) : [];
+  const tickets = S.key ? S.bets.map((b) => pickPlan(b).t).filter((t) => t.graded != null) : [];
   return `
   <div class="cardhead"><div><h1>Record</h1><div class="sub">Graded from the official orders you enter. Kept in this browser.</div></div>
     <div class="row">${S.key ? '<a class="btn small primary" href="#/results">Enter results</a>' : ''}<button class="btn small" data-act="export">Export record</button><label class="btn small">Import<input type="file" accept=".json,application/json" data-act="import" hidden></label></div></div>
-  ${S.key ? `<h2 class="section">${esc(S.card.track)} · ${esc(S.card.date)} — ${cur.length} graded</h2>${recordTables(summarize(cur))}
-    ${tickets.length ? `<div class="panel" style="margin-top:12px"><h3>Multi-race tickets</h3><table class="rec"><thead><tr><th>Ticket</th><th>Used</th><th>Cost</th><th>Result</th></tr></thead><tbody>${tickets.map((t) => `<tr><td>${esc(t.b.name)} R${t.b.races[0]}–${t.b.races[t.b.races.length - 1]}</td><td>${ticketLine(t)}</td><td>${dollars(t.cost)}</td><td>${t.graded ? '<span class="ok">hit</span>' : '<span class="no">miss</span>'}</td></tr>`).join('')}</tbody></table></div>` : ''}` : ''}
-  <h2 class="section">All cards — ${all.length} graded races</h2>${recordTables(summarize(all))}
+  ${S.key ? `<h2 class="section">${esc(S.card.track)} · ${esc(S.card.date)} — ${cur.length} graded</h2>${recordTables(summarize(cur), cur)}
+    ${tickets.length ? `<div class="panel" style="margin-top:12px"><h3>Multi-race tickets</h3><table class="rec"><thead><tr><th>Ticket</th><th>Call</th><th>Used</th><th>Cost</th><th>Result</th></tr></thead><tbody>${tickets.map((t) => `<tr><td>${esc(t.b.name)} R${t.b.races[0]}–${t.b.races[t.b.races.length - 1]}</td><td>${verdictPill(t)}</td><td>${ticketLine(t)}</td><td>${dollars(t.cost)}</td><td>${t.graded ? '<span class="ok">hit</span>' : '<span class="no">miss</span>'}</td></tr>`).join('')}</tbody></table></div>` : ''}` : ''}
+  <h2 class="section">All cards — ${all.length} graded races</h2>${recordTables(summarize(all), all)}
   ${per.length ? `<div class="panel" style="margin-top:12px"><h3>Cards</h3><table class="rec"><thead><tr><th>Card</th><th>Graded</th><th>Winners</th></tr></thead><tbody>${per.map(([v, rows]) => `<tr><td>${esc(v.track)} · ${esc(v.date)}</td><td>${rows.length}</td><td>${rows.filter((x) => x.win).length}</td></tr>`).join('')}</tbody></table></div>` : ''}`;
 }
 
@@ -657,7 +686,7 @@ function evalMult(rows, mult) {
   let ll = 0, hits = 0;
   for (const r of rows) {
     let best = -Infinity, bestP = null, sw = 0;
-    const sc = r.feat.map(([p, f]) => { const s = linearScore(f, mult) / 22; if (s > best) { best = s; bestP = p; } if (p === r.win) sw = s; return s; });
+    const sc = r.feat.map(([p, f]) => { const s = linearScore(f, mult) / TEMP; if (s > best) { best = s; bestP = p; } if (p === r.win) sw = s; return s; });
     const lse = best + Math.log(sc.reduce((a, s) => a + Math.exp(s - best), 0));
     ll += sw - lse;
     if (bestP === r.win) hits++;
@@ -744,6 +773,9 @@ function renderSettings() {
     <div class="row"><label class="note" for="shareName">Your name (optional, shown to whoever opens the link)</label></div>
     <div class="row"><input id="shareName" class="txt" maxlength="24" value="${esc(S.prefs.shareName)}" placeholder="e.g. Marshall"><button class="btn primary" data-act="share">Copy share link</button></div>
     <p class="note" id="shareOut">Friends who open the link get asked whether to use your weights. Their own settings stay put unless they say yes.</p></div>
+  <div class="panel" style="margin-top:12px"><h3>Email</h3>
+    <div class="row"><label class="note" for="emailTo">Send-to address(es) for Email PDF — separate with commas (used when your browser opens an email draft)</label></div>
+    <div class="row"><input id="emailTo" class="txt" type="email" multiple value="${esc(S.prefs.emailTo)}" placeholder="you@example.com, friend@example.com"><button class="btn" data-act="save-email">Save</button><span class="note" id="emailSaved"></span></div></div>
   <div style="margin-top:12px">${suggestionHtml()}</div>
   <div style="margin-top:12px">${methodHtml()}</div>`;
 }
@@ -794,34 +826,57 @@ function sharedBanner() {
 }
 
 // ---------------- print / PDF ----------------
+function cardHighlights() {
+  const c = S.card;
+  const races = c.races.filter((r) => r.ranked.length > 1);
+  const gapOf = (r) => r.ranked[0].score - r.ranked[1].score;
+  const best = [...races].sort((a, b) => (b.confidence - a.confidence) || (gapOf(b) - gapOf(a))).slice(0, 5);
+  const tris = [...races].filter((r) => r.trifecta.type !== 'N/A')
+    .sort((a, b) => (b.trifecta.hit - a.trifecta.hit)).slice(0, 5);
+  const good = races.flatMap((r) => r.value.good.map((p) => ({ r, h: horseOf(r, p) }))).sort((a, b) => b.h.value_ratio - a.h.value_ratio);
+  const bad = races.flatMap((r) => r.value.bad.map((p) => ({ r, h: horseOf(r, p) }))).sort((a, b) => b.h.value_ratio - a.h.value_ratio);
+  const longs = races.flatMap((r) => r.longshots.map((l) => ({ r, l }))).sort((a, b) => (b.l.overlay * Math.sqrt(b.l.hit)) - (a.l.overlay * Math.sqrt(a.l.hit))).slice(0, 8);
+  const plans = S.bets.map((b) => ({ b, ...pickPlan(b) }));
+  const spend = {
+    tri: races.reduce((a, r) => a + (r.trifecta.cost || 0), 0),
+    ex: races.reduce((a, r) => a + (r.exacta.cost || 0), 0),
+    sup: races.reduce((a, r) => a + (r.superfecta.cost || 0), 0),
+    ls: longs.reduce((a, x) => a + x.l.cost, 0),
+    picks: plans.filter((x) => x.t.verdict === 'PLAY').reduce((a, x) => a + x.t.cost, 0),
+  };
+  return { best, tris, good, bad, longs, plans, spend };
+}
+
 function buildPrint() {
   const c = S.card;
-  const costs = { exacta: 0, trifecta: 0, superfecta: 0, longshots: 0 };
-  for (const r of c.races) {
-    for (const k of ['exacta', 'trifecta', 'superfecta']) costs[k] += r[k].cost || 0;
-    costs.longshots += r.longshots.reduce((a, l) => a + l.cost, 0);
-  }
-  const tickets = S.bets.map(ticketFor);
-  const tktCost = tickets.reduce((a, t) => a + t.cost, 0);
-  const best = [...c.races].filter((r) => r.ranked.length > 1).sort((a, b) => (b.confidence - a.confidence) || ((b.ranked[0].score - b.ranked[1].score) - (a.ranked[0].score - a.ranked[1].score))).slice(0, 3);
+  const H = cardHighlights();
   const nScr = Object.values(S.st.scratches).reduce((a, b) => a + b.length, 0);
   const play = (t) => (t.type === 'PASS' || t.type === 'N/A' ? `<span class="faint">${t.type === 'PASS' ? 'pass' : 'n/a'}</span>` : `${esc(tc(t.type))} ${esc(t.text)}`);
-  const vlist = (r, k) => r.value[k].map((p) => `#${p} (${esc(horseOf(r, p).ml)})`).join(', ') || '<span class="faint">—</span>';
-  const summary = `<section class="pp cover"><h1>Card summary — ${esc(c.track)} <span class="muted" style="font-size:11pt">${esc(c.date)}</span></h1>
-    <p style="margin:4px 0 0"><b>Best bets:</b> ${best.map((r) => `R${r.number} #${r.ranked[0].pgm} ${esc(tc(r.ranked[0].name))} (${r.confidence}/5)`).join(' · ')}</p>
-    <p style="margin:2px 0 0"><b>All plays:</b> trifecta ${dollars(costs.trifecta)} · exacta ${dollars(costs.exacta)} · superfecta ${dollars(costs.superfecta)} · longshot tris ${dollars(costs.longshots)}${tickets.length ? ` · multi-race ${dollars(tktCost)}` : ''}</p>
-    <p class="muted" style="margin:2px 0 0">${esc(weightsText())}${nScr ? ` · ${nScr} scratch${nScr > 1 ? 'es' : ''} applied` : ''}</p>
-    <table><thead><tr><th>Race</th><th>Post</th><th>Win / Under</th><th>Projected 1-2-3</th><th>Trifecta</th><th>Exacta · Super</th><th>Good value</th><th>Bad value</th><th>Top longshot tri</th></tr></thead><tbody>
+  const vlist = (r, k) => r.value[k].map((p) => { const h = horseOf(r, p); return `#${p} ${esc(h.ml.replace('/', '-'))}→${esc(h.line)}`; }).join(', ') || '<span class="faint">—</span>';
+  const head = (sub) => `<h1>${esc(c.track)} <span class="muted" style="font-size:11pt">${esc(c.date)} · ${sub}</span></h1>
+    <p class="muted" style="margin:2px 0 6px">${esc(weightsText())}${nScr ? ` · ${nScr} scratch${nScr > 1 ? 'es' : ''} applied` : ''} · Model estimates from the program — check scratches and changes before you bet.</p>`;
+  const page1 = `<section class="pp cover">${head('Card summary (1 of 2)')}
+    <table><thead><tr><th>Race</th><th>Post</th><th>Win / Under</th><th>Projected top 5</th><th>Trifecta</th><th>Exacta · Super</th><th>Good value (ML→line)</th><th>Bad value (ML→line)</th></tr></thead><tbody>
     ${c.races.map((r) => { const rk = r.ranked;
-      return `<tr class="${r.confidence >= 5 ? 'hi' : ''}"><td><b>${r.number}</b></td><td>${esc(r.post_time)}</td>
+      return `<tr class="${r.confidence >= 5 ? 'hi' : ''}"><td><b style="font-size:11pt">${r.number}</b></td><td>${esc(r.post_time)}<br><span class="muted">${esc(tc(r.gait))}</span></td>
       <td><span class="stars">${stars(r.confidence)}</span> ${r.confidence}/5<br><span class="stars u">${stars(r.undercard)}</span> ${r.undercard}/5</td>
-      <td><b>#${rk[0].pgm} ${esc(tc(rk[0].name))}</b><br>#${rk[1].pgm} ${esc(tc(rk[1].name))}${rk[2] ? `, #${rk[2].pgm} ${esc(tc(rk[2].name))}` : ''}</td>
-      <td>${play(r.trifecta)}</td><td>${play(r.exacta)}<br>${play(r.superfecta)}</td>
-      <td class="gv">${vlist(r, 'good')}</td><td class="bv">${vlist(r, 'bad')}</td>
-      <td>${r.longshots[0] ? esc(r.longshots[0].text) : '<span class="faint">—</span>'}</td></tr>`; }).join('')}
-    </tbody></table>
-    ${tickets.length ? `<h2 style="font-size:10pt;margin:8px 0 2px">Multi-race tickets (${STYLES[S.prefs.pickStyle].toLowerCase()})</h2><table><tbody>${tickets.map((t) => `<tr><td><b>${esc(t.b.name)}</b> R${t.b.races[0]}–${t.b.races[t.b.races.length - 1]}</td><td>${ticketLine(t)}</td><td>${t.combos} × ${baseLabel(t.base)} = <b>${dollars(t.cost)}</b></td><td>model hit ~${pctP(t.hit, t.hit < 0.1 ? 1 : 0)}</td></tr>`).join('')}</tbody></table>` : ''}
-    <p class="muted" style="margin-top:6px">Model estimates from the program — check scratches and changes before you bet.</p></section>`;
+      <td><b>#${rk[0].pgm} ${esc(tc(rk[0].name))}</b> <span class="muted">(${esc(rk[0].ml)})</span><br>${rk.slice(1, 5).map((h) => `#${h.pgm}`).join(' · ')}</td>
+      <td><b>${play(r.trifecta)}</b></td><td>${play(r.exacta)}<br>${play(r.superfecta)}</td>
+      <td class="gv">${vlist(r, 'good')}</td><td class="bv">${vlist(r, 'bad')}</td></tr>`; }).join('')}
+    </tbody></table></section>`;
+  const sp = H.spend;
+  const li = (x) => `<li>${x}</li>`;
+  const page2 = `<section class="pp cover sum2">${head('Best bets & plays (2 of 2)')}
+    <div class="s2">
+      <div class="s2box"><h2>Best bets</h2><ol>${H.best.map((r) => li(`<b>R${r.number} #${r.ranked[0].pgm} ${esc(tc(r.ranked[0].name))}</b> <span class="muted">ML ${esc(r.ranked[0].ml)} · line ${esc(r.ranked[0].line)} · ${r.confidence}/5</span><br><span class="small">${esc((r.ranked[0].pros[0] || ['best overall profile'])[0])}</span>`)).join('')}</ol></div>
+      <div class="s2box"><h2>Best trifectas</h2><ol>${H.tris.map((r) => li(`<b>R${r.number} ${esc(tc(r.trifecta.type))} ${esc(r.trifecta.text)}</b> <span class="muted">${dollars(r.trifecta.cost)} · model hit ~${Math.round(r.trifecta.hit * 100)}%</span>`)).join('')}</ol></div>
+      <div class="s2box"><h2>Good value <span class="muted">(ML → our line)</span></h2>${H.good.length ? `<ol>${H.good.slice(0, 8).map(({ r, h }) => li(`<b class="gv">R${r.number} #${h.pgm} ${esc(tc(h.name))}</b> ML ${esc(h.ml.replace('/', '-'))} → line <b>${esc(h.line)}</b> <span class="muted">· ranked ${ord(h.rank)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
+      <div class="s2box"><h2>Bad value — bet against <span class="muted">(ML → our line)</span></h2>${H.bad.length ? `<ol>${H.bad.slice(0, 8).map(({ r, h }) => li(`<b class="bv">R${r.number} #${h.pgm} ${esc(tc(h.name))}</b> ML ${esc(h.ml.replace('/', '-'))} → line <b>${esc(h.line)}</b> <span class="muted">· ranked ${ord(h.rank)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
+      <div class="s2box"><h2>Longshot trifectas <span class="muted">(top ${H.longs.length})</span></h2>${H.longs.length ? `<ol>${H.longs.map(({ r, l }) => li(`<b>R${r.number} ${esc(l.text)}</b> <span class="muted">${dollars(l.cost)} · ${esc(l.label)} · model ${pctP(l.hit, 1)} vs ML ${pctP(l.market, l.market < 0.01 ? 2 : 1)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
+      <div class="s2box"><h2>Pick 3 / 4 / 5 &amp; doubles</h2>${H.plans.length ? `<ul class="plain">${H.plans.map(({ b, t, alt }) => li(`${t.verdict === 'PLAY' ? '<b class="gv">PLAY</b>' : '<span class="muted">PASS</span>'} <b>${esc(b.name)} R${b.races[0]}–${b.races[b.races.length - 1]}</b> ${t.verdict === 'PLAY' ? `${ticketLine(t)} = <b>${dollars(t.cost)}</b> <span class="muted">(~${pctP(t.hit, 1)})</span>` : `<span class="muted">— ${esc(t.why)}</span>`}${alt ? `<br><span class="small">At $10: ${ticketLine(alt)} = ${dollars(alt.cost)} (~${pctP(alt.hit, 1)})</span>` : ''}`)).join('')}</ul>` : '<p class="muted">No multi-race wagers on this card.</p>'}</div>
+    </div>
+    <div class="spend"><b>If you play everything:</b> trifectas ${dollars(sp.tri)} · exactas ${dollars(sp.ex)} · superfectas ${dollars(sp.sup)} · longshot tris above ${dollars(sp.ls)} · Pick plays ${dollars(sp.picks)} · <b>total ${dollars(sp.tri + sp.ex + sp.sup + sp.ls + sp.picks)}</b></div>
+  </section>`;
   const races = c.races.map((r) => {
     const scrSet = new Set(S.st.scratches[r.number] || []);
     const sorted = [...r.horses].sort((a, b) => a.pgm - b.pgm);
@@ -831,7 +886,7 @@ function buildPrint() {
       <div class="pnotes"><span class="ord">OFFICIAL ORDER ${['1st', '2nd', '3rd', '4th'].map((l, i) => `${l}<span>${res[i] || ''}</span>`).join('')}</span>NOTES — RACE ${r.number} <span class="faint">· green = best in race, red = worst</span><br>${esc(S.st.notes[r.number] || '')}</div></section>`;
   }).join('');
   const root = $('#print');
-  root.innerHTML = races + summary;
+  root.innerHTML = races + page1 + page2;
   const maxH = 7.8 * 96;
   for (const pg of root.querySelectorAll('.pp')) {
     pg.style.zoom = '';
@@ -847,45 +902,108 @@ function loadScript(src) {
     document.head.appendChild(el);
   });
 }
-async function downloadPdf() {
-  if (!S.key || S._pdfBusy) return;
-  S._pdfBusy = true;
-  const ov = document.createElement('div');
-  ov.className = 'overlay'; ov.innerHTML = '<div class="overlay-box"><b>Building your PDF…</b><div id="pdfProg" class="note">Getting ready</div></div>';
-  document.body.appendChild(ov);
+const pdfName = () => `${(S.card.track || 'card').replace(/\W+/g, '-')}-${(S.card.date || '').replace(/^\w+, /, '').replace(/\W+/g, '-')}-picks.pdf`.replace(/-+/g, '-');
+async function makePdf(progress) {
+  if (S.dirty) { rescoreAll(); S.dirty = false; }
+  await Promise.all([loadScript('vendor/html2canvas.min.js'), loadScript('vendor/jspdf.umd.min.js')]);
+  buildPrint();
   const root = $('#print');
+  root.classList.add('capture');
   try {
-    if (S.dirty) { rescoreAll(); S.dirty = false; }
-    await Promise.all([loadScript('vendor/html2canvas.min.js'), loadScript('vendor/jspdf.umd.min.js')]);
-    buildPrint();
-    root.classList.add('capture');
     const pages = [...root.querySelectorAll('.pp')];
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation: 'landscape', unit: 'in', format: 'letter', compress: true });
-    const W = 11, H = 8.5, M = 0.3;
+    doc.setProperties({ title: `${S.card.track} ${S.card.date} — picks`, creator: 'Harness Handicapper' });
+    const W = 11, Hh = 8.5, M = 0.3;
+    const scale = /iPad|iPhone|Macintosh/.test(navigator.userAgent) && 'ontouchend' in document ? 1.4 : 1.7;
     for (let i = 0; i < pages.length; i++) {
-      $('#pdfProg').textContent = `Page ${i + 1} of ${pages.length}`;
+      progress(`Page ${i + 1} of ${pages.length}`);
       const pg = pages[i];
       pg.style.zoom = '';
-      const canvas = await window.html2canvas(pg, { scale: 1.7, backgroundColor: '#ffffff', logging: false, windowWidth: pg.scrollWidth });
+      const canvas = await window.html2canvas(pg, { scale, backgroundColor: '#ffffff', logging: false, windowWidth: pg.scrollWidth });
       const img = canvas.toDataURL('image/jpeg', 0.8);
       const ratio = canvas.width / canvas.height;
       let w = W - 2 * M, h = w / ratio;
-      if (h > H - 2 * M) { h = H - 2 * M; w = h * ratio; }
+      if (h > Hh - 2 * M) { h = Hh - 2 * M; w = h * ratio; }
       if (i) doc.addPage('letter', 'landscape');
       doc.addImage(img, 'JPEG', (W - w) / 2, M, w, h, undefined, 'FAST');
       canvas.width = canvas.height = 0;
     }
-    const name = `${(S.card.track || 'card').replace(/\W+/g, '-')}-${(S.card.date || '').replace(/^\w+, /, '').replace(/\W+/g, '-')}.pdf`.replace(/-+/g, '-');
-    doc.save(name);
-  } catch (e) {
-    console.error(e);
-    alert('Could not build the PDF: ' + (e.message || e) + '. You can still use Print → Save as PDF.');
+    return doc.output('blob');
   } finally {
     root.classList.remove('capture');
-    ov.remove();
-    S._pdfBusy = false;
   }
+}
+function overlay(title) {
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `<div class="overlay-box" role="dialog" aria-live="polite"><b>${esc(title)}</b><div class="note ov-msg">Getting ready</div></div>`;
+  document.body.appendChild(ov);
+  return { el: ov, msg: (m) => { ov.querySelector('.ov-msg').textContent = m; }, html: (h) => { ov.querySelector('.overlay-box').innerHTML = h; }, close: () => ov.remove() };
+}
+function saveBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+async function downloadPdf() {
+  if (!S.key || S._pdfBusy) return;
+  S._pdfBusy = true;
+  const ov = overlay('Building your PDF…');
+  try { saveBlob(await makePdf(ov.msg), pdfName()); }
+  catch (e) { console.error(e); alert('Could not build the PDF: ' + (e.message || e) + '. You can still use Print → Save as PDF.'); }
+  finally { ov.close(); S._pdfBusy = false; }
+}
+function emailBody() {
+  const H = cardHighlights();
+  const L = [`${S.card.track} — ${S.card.date}`, weightsText(), ''];
+  L.push('BEST BETS');
+  for (const r of H.best) L.push(`  R${r.number} #${r.ranked[0].pgm} ${tc(r.ranked[0].name)} (ML ${r.ranked[0].ml}, our line ${r.ranked[0].line}) ${r.confidence}/5`);
+  L.push('', 'TRIFECTAS');
+  for (const r of S.card.races) if (r.trifecta.type !== 'N/A') L.push(`  R${r.number} ${tc(r.trifecta.type)} ${r.trifecta.text}`);
+  if (H.good.length) { L.push('', 'GOOD VALUE (ML -> our line)'); for (const { r, h } of H.good.slice(0, 6)) L.push(`  R${r.number} #${h.pgm} ${tc(h.name)} ${h.ml.replace('/', '-')} -> ${h.line}`); }
+  const plays = H.plans.filter((x) => x.t.verdict === 'PLAY');
+  if (plays.length) { L.push('', 'PICK PLAYS'); for (const { b, t } of plays) L.push(`  ${b.name} R${b.races[0]}-${b.races[b.races.length - 1]}: ${ticketLine(t)} = $${t.cost.toFixed(2)}`); }
+  L.push('', `Full race-by-race PDF attached (${pdfName()}).`);
+  return L.join('\n');
+}
+async function emailPdf() {
+  if (!S.key || S._pdfBusy) return;
+  S._pdfBusy = true;
+  const ov = overlay('Building your PDF for email…');
+  const subject = `${S.card.track} ${S.card.date.replace(/^\w+, /, '')} — picks`;
+  const to = (S.prefs.emailTo || '').trim();
+  try {
+    const blob = await makePdf(ov.msg);
+    const file = new File([blob], pdfName(), { type: 'application/pdf' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      ov.html(`<b>PDF ready</b><p class="note">Pick <b>Mail</b> (or Outlook / Gmail) in the share menu — the PDF goes in as an attachment.</p><button class="btn primary" id="ovShare">Share / Email</button> <button class="btn" id="ovCancel">Cancel</button>`);
+      await new Promise((resolve) => {
+        $('#ovCancel').onclick = resolve;
+        $('#ovShare').onclick = async () => {
+          try { await navigator.share({ files: [file], title: subject, text: emailBody() }); }
+          catch (e) { if (e.name !== 'AbortError') { saveBlob(blob, pdfName()); openMailDraft(to, subject); } }
+          resolve();
+        };
+      });
+    } else {
+      saveBlob(blob, pdfName());
+      ov.html(`<b>PDF downloaded</b><p class="note">Your email is opening with the picks typed in. Attach <b>${esc(pdfName())}</b> from your Downloads folder, then send.</p><button class="btn primary" id="ovMail">Open email</button> <button class="btn" id="ovDone">Done</button>`);
+      await new Promise((resolve) => {
+        $('#ovDone').onclick = resolve;
+        $('#ovMail').onclick = () => { openMailDraft(to, subject); resolve(); };
+      });
+    }
+  } catch (e) {
+    console.error(e);
+    alert('Could not build the PDF: ' + (e.message || e));
+  } finally { ov.close(); S._pdfBusy = false; }
+}
+function openMailDraft(to, subject) {
+  let body = emailBody();
+  if (body.length > 1700) body = body.slice(0, 1700) + '\n…';
+  location.href = `mailto:${encodeURIComponent(to).replace(/%2C/gi, ',').replace(/%40/g, '@')}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
 
 // ---------------- router ----------------
@@ -924,7 +1042,7 @@ function renderRecent() {
 
 // ---------------- events ----------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pstyle],[data-preset-ticket]');
+  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket]');
   if (!t) return;
   const act = t.dataset.act;
   if (t.dataset.scr) {
@@ -940,11 +1058,11 @@ document.addEventListener('click', (e) => {
     saveState(); render();
   } else if (t.dataset.sort) { S.prefs.sort = t.dataset.sort; LS.set(PREF_KEY, S.prefs); render(); }
   else if (t.dataset.view) { S.prefs.view = t.dataset.view; LS.set(PREF_KEY, S.prefs); render(); }
-  else if (t.dataset.pstyle) { S.prefs.pickStyle = t.dataset.pstyle; LS.set(PREF_KEY, S.prefs); render(); }
+  else if (t.dataset.pbudget) { S.prefs.pickBudget = +t.dataset.pbudget; LS.set(PREF_KEY, S.prefs); render(); }
   else if (t.dataset.pick) {
     const [id, ns, ps] = t.dataset.pick.split('|');
     const b = S.bets.find((x) => x.id === id);
-    const tk = ticketFor(b);
+    const tk = pickPlan(b).t;
     const leg = tk.legs.find((l) => l.n === +ns);
     let sel = [...leg.sel];
     const p = +ps;
@@ -971,6 +1089,11 @@ document.addEventListener('click', (e) => {
     S.tuneOpen = !S.tuneOpen; render();
   } else if (act === 'pdf') {
     downloadPdf();
+  } else if (act === 'email') {
+    emailPdf();
+  } else if (act === 'save-email') {
+    S.prefs.emailTo = ($('#emailTo').value || '').trim(); LS.set(PREF_KEY, S.prefs);
+    $('#emailSaved').textContent = S.prefs.emailTo ? 'Saved.' : 'Cleared.';
   } else if (act === 'print') {
     buildPrint(); window.print();
   } else if (act === 'share') {
@@ -1059,7 +1182,7 @@ const drop = $('#drop');
 ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', (e) => loadFile(e.dataTransfer.files[0]));
 
-$('#printBtn').addEventListener('click', () => downloadPdf());
+$('#printBtn').addEventListener('click', () => emailPdf());
 window.addEventListener('beforeprint', () => { if (S.key) buildPrint(); });
 window.addEventListener('hashchange', () => { if (S.dirty && S.key) { rescoreAll(); S.dirty = false; } render(); window.scrollTo(0, 0); });
 
