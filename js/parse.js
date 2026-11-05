@@ -170,20 +170,20 @@ function parseStatsBox(ws) {
   for (const lab of labels) {
     const t0 = lab.top;
     const band = ws.filter((w) => w.x0 >= 478 && w.top >= t0 - 1.8 && w.top <= t0 + 1.8 && w !== lab).sort((a, b) => a.x0 - b.x0);
-    const nums = (band.filter((w) => w.text.includes('~')).map((w) => w.text).join(' ').match(/\d+/g) || []).map(Number);
+    const nums = (band.filter((w) => w.x0 < 530 && !w.text.startsWith('$') && (w.text.includes('~') || isDigits(w.text))).sort((a, b) => a.x0 - b.x0)
+      .map((w) => w.text).join(' ').match(/\d+/g) || []).map(Number);
     const st = {};
     if (nums.length >= 4) Object.assign(st, { starts: nums[0], wins: nums[1], places: nums[2], shows: nums[3] });
     const earn = band.filter((w) => w.text.startsWith('$')).map((w) => w.text);
     st.earnings = earn.length ? parseInt(earn[0].replace(/[$,]/g, ''), 10) : 0;
-    const markw = band.filter((w) => w.x0 >= 550 && w.x0 < 563 && isDigits(w.text));
-    const fifth = band.filter((w) => w.x0 >= 562 && w.x0 < 567 && w.size > 7 && isDigits(w.text));
-    const trk = band.filter((w) => w.x0 >= 566 && w.x0 < 582).map((w) => w.text).join('');
-    const age = band.filter((w) => w.x0 >= 581 && w.x0 < 595).map((w) => w.text);
-    if (markw.length) {
-      st.mark = tsec(markw[0].text, fifth.length ? fifth[0].text : null);
-      st.mark_track = trk;
-      st.mark_size = trk ? (TRACK_SIZE[trk.slice(-1)] ?? 0.625) : 0.625;
-      st.mark_q = !!(age.length && age[0].includes('Q'));
+    // mark area: <time> [fifth] <track…> <age>[Q]   e.g. "154 3 YR ½ 5Q" or "150 3 PcD Á 9"
+    const tail = band.filter((w) => w.x0 >= 545 && !w.text.startsWith('$') && w.text !== 'L5').sort((a, b) => a.x0 - b.x0).map((w) => w.text);
+    const mm = tail.join(' ').match(/^(\d{3,4})(?:\s+(\d))?\s*([A-Za-z]+\s*[½ÁÂ1]?)\s*(\d+Q?)?/);
+    if (mm && lab.text !== 'Off') {
+      st.mark = tsec(mm[1], mm[1].length === 3 ? mm[2] || null : null);
+      st.mark_track = mm[3].replace(/\s+/g, '');
+      st.mark_size = TRACK_SIZE[st.mark_track.slice(-1)] ?? 0.625;
+      st.mark_q = !!(mm[4] && mm[4].includes('Q'));
     }
     if (!(lab.text in res)) res[lab.text] = st;
   }
@@ -223,9 +223,22 @@ export async function parseProgram(pdfDoc) {
     const head = ws.filter((w) => w.top < 28).sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ');
     const hm = head.match(/([A-Z ]+?)\s+-\s+([A-Z]+DAY, [A-Z]+ \d+, \d{4})/);
     if (hm && !card.track) { card.track = titleCase(hm[1].trim()); card.date = titleCase(hm[2]); }
-    const rn = ws.filter((w) => w.size > 25 && w.top < 45);
-    if (!rn.length) continue;
-    const race = { number: parseInt(rn[0].text, 10) };
+    const rn = ws.filter((w) => w.size > 33 && w.top < 45 && isDigits(w.text));
+    const footTxt = ws.filter((w) => w.top > height - 40).sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ');
+    const fm = footTxt.match(/Race (\d+)\s*-\s*Page/);
+    const hasHorses = ws.some((w) => w.size > 25 && w.size < 33 && w.x0 < 40 && isDigits(w.text));
+    let race;
+    if (rn.length) {
+      race = { number: parseInt(rn[0].text, 10) };
+    } else if (hasHorses && card.races.length) {
+      // continuation page: more horses for the race started on an earlier page
+      const n = fm ? parseInt(fm[1], 10) : card.races[card.races.length - 1].number;
+      race = card.races.find((r) => r.number === n);
+      if (!race) continue;
+      race._cont = true;
+    } else continue;
+    const isCont = !rn.length;
+    if (!isCont) {
     const pm = head.match(/PURSE \$([\d,]+)/);
     race.purse = pm ? parseInt(pm[1].replace(/,/g, ''), 10) : null;
     const top = ws.filter((w) => w.top < 70);
@@ -233,14 +246,16 @@ export async function parseProgram(pdfDoc) {
     const byLine = [...top].sort((a, b) => (Math.round(a.top) - Math.round(b.top)) || (a.x0 - b.x0));
     race.conditions = byLine.filter((w) => w.x0 >= 150 && w.x0 < 462 && w.top > 30 && w.top < 62).map((w) => w.text).join(' ');
     race.wagers = byLine.filter((w) => w.x0 >= 455 && w.top > 30 && w.top < 62).map((w) => w.text).join(' ');
-    const pt = top.filter((w) => w.top > 60 && w.top < 70).sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ');
-    const m = pt.match(/POST - ([\d:]+) CR (\d+)/);
+    const pt = byLine.filter((w) => w.top > 28).map((w) => w.text).join(' ');
+    const m = pt.match(/POST\s*-\s*([\d:]+)\s+CR\s+(\d+)/);
     race.post_time = m ? m[1] : '';
     race.cr = m ? parseInt(m[2], 10) : null;
+    race.horses = [];
+    }
     const footTops = ws.filter((w) => w.text === 'Help' || w.text === '©').map((w) => w.top);
     const footer = footTops.length ? Math.min(...footTops) : height;
-    const nums = ws.filter((w) => w.size > 20 && w.x0 < 40 && w.top > 60 && isDigits(w.text)).sort((a, b) => a.top - b.top);
-    const horses = [];
+    const nums = ws.filter((w) => w.size > 25 && w.size < 33 && w.x0 < 40 && w.top > (isCont ? 10 : 60) && isDigits(w.text)).sort((a, b) => a.top - b.top);
+    const horses = race.horses;
     nums.forEach((nw, i) => {
       const b0 = nw.top - 21;
       const b1 = i + 1 < nums.length ? nums[i + 1].top - 21 : footer;
@@ -262,9 +277,32 @@ export async function parseProgram(pdfDoc) {
       const sa = h.pedigree.match(/^(\w+) (\w) (\d+)/);
       h.sex = sa ? sa[2] : ''; h.age = sa ? parseInt(sa[3], 10) : null;
       h.driver = ''; h.trainer = ''; h.drv_w = null; h.trn_w = null; h.drv_udr = null; h.trn_st = null; h.earn_l5 = null;
-      const dl = bw.find((w) => w.text === 'Driver' && w.x0 < 60);
+      const dl = bw.find((w) => (w.text === 'Driver' || w.text === 'Driver:') && w.x0 < 60);
       let rowsStart = b0 + 25;
-      if (dl) {
+      if (dl && dl.text === 'Driver:') {
+        // Platinum: "Driver: JIM TAGGART JR silks   Trainer: CHRIS LEFEBVRE", stats on "Last365" lines below
+        const line = bw.filter((w) => Math.abs(w.top - dl.top) < 2.5).sort((a, b) => a.x0 - b.x0);
+        const caps = (arr) => { const out = []; for (const w of arr) { const t = w.text; if ((t === t.toUpperCase() && /[A-Z]/.test(t)) || t === '(P)') out.push(t); else break; } return titleCase(out.join(' ').replace('(P)', '').trim()); };
+        const trIdx = line.findIndex((w) => w.text === 'Trainer:');
+        h.driver = caps(line.filter((w) => w.x0 > dl.x0 && (trIdx < 0 || w.x0 < line[trIdx].x0)));
+        if (trIdx >= 0) h.trainer = caps(line.slice(trIdx + 1).filter((w) => w.x0 < 465));
+        const statLine = (label, x0, x1) => {
+          const l = bw.filter((w) => w.text.replace('*', '') === label && w.x0 >= x0 && w.x0 < x1 && w.top > dl.top)[0];
+          if (!l) return null;
+          return bw.filter((w) => Math.abs(w.top - l.top) < 2 && w.x0 >= x0 && w.x0 < x1 + 190).sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ').replace(/~+/g, ' ');
+        };
+        const dS = statLine('Last365', 40, 60), tS = statLine('Last365', 230, 250);
+        const num = (t, re) => { const x = t && t.match(re); return x ? parseFloat(x[1]) : null; };
+        if (dS) { h.drv_st = num(dS, /St\s+(\d+)/); h.drv_w = num(dS, /W\s+(\d+)%/); h.drv_udr = num(dS, /UDR\s+([.\d]+)/); }
+        if (tS) { h.trn_st = num(tS, /St\s+(\d+)/); h.trn_w = num(tS, /W\s+(\d+)%/); h.trn_utr = num(tS, /UTR\s+([.\d]+)/); }
+        const l5 = bw.filter((w) => w.text.startsWith('$') && w.x0 > 560 && w.top > dl.top - 2 && w.top < dl.top + 12).map((w) => w.text);
+        if (l5.length) h.earn_l5 = parseInt(l5[l5.length - 1].replace(/[$,]/g, ''), 10);
+        const firstPP = bw.filter((w) => w.x0 >= 55 && w.x0 < 66 && /^\d\d[A-Z][a-z]{2}\d\d$/.test(w.text)).map((w) => w.top);
+        rowsStart = firstPP.length ? Math.min(...firstPP) - 1 : dl.top + 4;
+        // TrackMaster Platinum ratings
+        const rat = (lab) => { const l = bw.find((w) => w.text === lab && w.x0 > 385 && w.x0 < 440); if (!l) return null; const v = bw.filter((w) => Math.abs(w.top - l.top) < 2.5 && w.x0 > l.x0 && w.x0 < l.x0 + 40 && /^\d+(\.\d)?$/.test(w.text)).sort((a, b) => a.x0 - b.x0)[0]; return v ? parseFloat(v.text) : null; };
+        h.tm = { power: rat('POWER'), speed: rat('SPEED'), pace: rat('PACE'), class: rat('CLASS') };
+      } else if (dl) {
         const line = bw.filter((w) => Math.abs(w.top - dl.top) < 2.5).sort((a, b) => a.x0 - b.x0);
         const lt = line.map((w) => w.text).join(' ');
         const dm = lt.match(/Driver - (.+?)\s+(?:[a-z(].*?)?\(\s*\*?St (\d+) W (\d+)% P (\d+)% S (\d+)% UDR ([.\d]+)/);
@@ -296,8 +334,7 @@ export async function parseProgram(pdfDoc) {
       h.pp = anchors.map((a) => parsePPRow(rows.get(a)));
       horses.push(h);
     });
-    race.horses = horses;
-    card.races.push(race);
+    if (!isCont) card.races.push(race);
   }
   card.races.sort((a, b) => a.number - b.number);
   return card;

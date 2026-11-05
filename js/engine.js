@@ -69,14 +69,19 @@ export const ADJ = {
 // rough circuit tiers (1 = toughest); unknown tracks default to 3
 const TRACK_TIER = {
   M: 1, YR: 1, Wbsb: 1, Moh: 1, Lex: 1, Mohk: 1,
-  PcD: 2, Phl: 2, Mea: 2, HoP: 2, DD: 2, ScD: 2, PRc: 2,
+  PcD: 2, Phl: 2, Mea: 2, HoP: 2, DD: 2, ScD: 2, PRc: 2, Har: 2, MVR: 2, DTN: 3, Aces: 3, Bang: 4, Gosh: 4, Brtn: 4, Nrthv: 3,
   Nfld: 3, Stga: 3, VD: 3, TgDn: 3, Btva: 3, MR: 3, RcR: 3, GeoD: 3, OakGr: 3, Fhld: 3,
+  Frybg: 4, Cumb: 4, Farm: 4, Skow: 4, Bang: 4, Scar: 4, Wind: 4, Oxfd: 4, Fair: 4, Topsh: 4, Union: 4, Northam: 4,
   Wdstk: 4, Hstng: 4, Fwvl: 4, Cntrv: 4, Allgn: 4, Elmra: 4, Grtz: 4, Mayfd: 4, Meadv: 4, Spr: 4, Caro: 4, Chfld: 4,
 };
 const TRACK_NAME = {
   M: 'the Meadowlands', YR: 'Yonkers', Wbsb: 'Mohawk', Lex: 'the Red Mile', PcD: 'Pocono', Phl: 'Philly',
   Mea: 'the Meadows', HoP: 'Hoosier', DD: 'Dover', ScD: 'Scioto', Nfld: 'Northfield', Stga: 'Saratoga',
   VD: 'Vernon', TgDn: 'Tioga', Btva: 'Batavia', MR: 'Monticello', RcR: 'Rosecroft', GeoD: 'Georgian', OakGr: 'Oak Grove',
+  PRc: 'Plainridge', Aces: 'Running Aces', Har: 'Harrington', MVR: 'Miami Valley', DTN: 'Dayton', Bang: 'Bangor',
+  Frybg: 'Fryeburg Fair', Cumb: 'Cumberland Fair', Farm: 'Farmington Fair', Skow: 'Skowhegan Fair', Scar: 'Scarborough',
+  Wind: 'Windsor Fair', Oxfd: 'Oxford Fair', Topsh: 'Topsham Fair', Union: 'Union Fair', Gosh: 'Goshen', Brtn: 'a fair track',
+  Wdstk: 'Woodstock', Hstng: 'Hastings', Fhld: 'Freehold', Lex: 'the Red Mile', Mohk: 'Mohawk', Fwvl: 'Fowlerville', Nrthv: 'Northville',
 };
 
 export const trackKey = (t) => (t || '').replace(/[½ÁÂ1]+$/, '');
@@ -321,11 +326,20 @@ function confidence(ranked) {
   return Math.max(1, Math.min(5, c));
 }
 
+// "50 CENT", "20 CENT", "$1", "$2", "$.50", "$1.00", "$.10" … → dollars
+const BASE_RE = '(\\d+ CENT|\\$\\d*\\.\\d+|\\$\\d+(?:\\.\\d+)?)';
+function baseValue(t) {
+  if (!t) return null;
+  const c = t.match(/^(\d+) CENT$/);
+  if (c) return +c[1] / 100;
+  const v = parseFloat(t.replace('$', ''));
+  return isFinite(v) && v > 0 ? v : null;
+}
 export function wagerBase(race, name) {
   const w = race.wagers || '';
   if (!w.includes(name)) return null;
-  const m = w.match(new RegExp('(50 CENT|20 CENT|10 CENT|\\$1|\\$2)\\s*-?\\s*' + name));
-  return m ? { '50 CENT': 0.5, '20 CENT': 0.2, '10 CENT': 0.1, '$1': 1.0, '$2': 2.0 }[m[1]] : 1.0;
+  const m = w.match(new RegExp(BASE_RE + '\\s*-?\\s*' + name));
+  return (m && baseValue(m[1])) || 1.0;
 }
 
 // Key when the top pick stands alone: 4/5+ confidence with a clear edge on the second choice,
@@ -511,16 +525,16 @@ function longshotCall(race) {
 // Multi-race wagers listed in the program header, e.g. "50 CENT PICK 4 (1-2-3-4)".
 export function multiRaceBets(card) {
   const out = [];
-  const BASES = { '50 CENT': 0.5, '20 CENT': 0.2, '10 CENT': 0.1, '$1': 1, '$2': 2 };
+  const re = new RegExp('(?:' + BASE_RE + '\\s+)?((?:1ST HALF\\s+)?(?:DAILY|LATE|EARLY)\\s+DOUBLE|PICK\\s*[3-6])\\s*(?:\\([^)]*GUARANTEE[^)]*\\)\\s*)?\\(([\\d\\s-]+)\\)', 'g');
   for (const r of card.races) {
-    const re = /(?:(50 CENT|20 CENT|10 CENT|\$1|\$2)\s+)?((?:1ST HALF\s+)?(?:DAILY|LATE|EARLY)\s+DOUBLE|PICK\s*[3-6])\s*\(([\d\s-]+)\)/g;
     let m;
     while ((m = re.exec(r.wagers || ''))) {
       const races = m[3].split('-').map((x) => parseInt(x, 10)).filter((x) => x > 0);
       if (races.length < 2) continue;
       let name = m[2].replace(/1ST HALF\s+/, '').replace(/\s+/g, ' ').trim();
       name = name.replace(/^PICK\s*(\d)$/, 'Pick $1').replace(/(\w+) DOUBLE/, (x, a) => a[0] + a.slice(1).toLowerCase() + ' Double');
-      const base = m[1] ? BASES[m[1]] : 1;
+      // when the program doesn't print a base: $1 for doubles and Pick 3, 50¢ for Pick 4/5/6
+      const base = baseValue(m[1]) ?? (/Pick [456]/.test(name) ? 0.5 : 1);
       const id = `${name}-${races.join('-')}`;
       if (!out.some((x) => x.id === id)) out.push({ id, name, races, base });
     }

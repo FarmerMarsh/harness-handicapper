@@ -396,3 +396,4 @@ details summary { cursor: pointer; margin-top: 8px; }
 .print-root .s2box .small { font-size: 7pt; color: var(--muted); }
 .print-root .spend { margin-top: 8px; font-size: 8.5pt; background: var(--gold-l); border-radius: 6px; padding: 6px 10px; }
 .overlay-box p { max-width: 340px; margin: 8px auto 12px; }
+.print-root table.ht { min-width: 0; }
