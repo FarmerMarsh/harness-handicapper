@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=6';
+import { fmtTime } from './parse.js?v=7';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -19,10 +19,17 @@ export const DEFAULT_WEIGHTS = {
   year: 8,        // current-year win / top-3 %
   driver: 7,      // driver UDR
   trainer: 3,     // trainer win %
-  post: 2,        // Trackmaster post rating
+  post: 7,        // the track's real post-position win index (front page / program post rating)
   late: 4,        // avg spots gained 3/4 -> finish
   season_mark: 3, // current-year mark, mile-adjusted (lifetime mark if none this year)
+  trend: 10,      // speed figures rising or falling over the last 3–4 starts
+  hot: 5,         // driver & trainer last 30 days vs the year
+  conn: 5,        // driver/trainer team, record at this track, new-barn move
+  offtrack: 6,    // off-track record + sire off-track (only when the track is set to Off)
 };
+// Weighted points are rescaled to this total so adding factors (or turning some up) doesn't
+// change how spread out the win chances are — only which horses get the credit.
+const BASE_SUM = 108;
 
 // Everything a user can turn up or down. Multiplier 1 = normal.
 export const FACTORS = [
@@ -38,11 +45,15 @@ export const FACTORS = [
   { key: 'year', group: 'weight', label: 'This-year record', help: 'Win % and top-3 % this year' },
   { key: 'driver', group: 'weight', label: 'Driver', help: 'Driver UDR' },
   { key: 'trainer', group: 'weight', label: 'Trainer', help: 'Trainer win %' },
-  { key: 'post', group: 'weight', label: 'Post position', help: 'Program post rating, weighted by track size: half-mile 4×, ⅝ 2.5×, ⅞ 1.5×, mile 1×' },
+  { key: 'post', group: 'weight', label: 'Post position', help: 'The track\'s real win rate from each post (bigger on half-mile tracks, where post matters most)' },
+  { key: 'trend', group: 'weight', label: 'Speed trend', help: 'Speed figures rising or falling over the last 3–4 starts' },
+  { key: 'hot', group: 'weight', label: 'Hot / cold driver & trainer', help: 'Last 30 days vs the year (Platinum programs)' },
+  { key: 'conn', group: 'weight', label: 'Connections & course', help: 'Driver/trainer team record, record at this track, first starts for a new barn' },
+  { key: 'offtrack', group: 'weight', label: 'Off-track ability', help: 'Only counts when today\'s track is set to Off: off-track record and sire off-track stats' },
   { key: 'pace', group: 'adj', label: 'Pace setup', help: 'Lone speed bonus, speed-duel penalty, closer boost in a hot pace' },
   { key: 'driver_change', group: 'adj', label: 'Driver change', help: 'Upgrade bonus / downgrade penalty vs last start' },
   { key: 'tough_trip', group: 'adj', label: 'Tough-trip credit', help: 'Bonus for parked or first-over trips that still finished close' },
-  { key: 'breaks', group: 'pen', label: 'Break penalty', help: 'Penalty for breaking stride in the last 5' },
+  { key: 'breaks', group: 'pen', label: 'Break penalty', help: 'Breaking stride in recent starts — trotters count 10 starts back and are hit harder' },
   { key: 'layoff', group: 'pen', label: 'Layoff / stale-form penalty', help: 'Penalty for time off and old form lines' },
 ];
 export const POST_SCALE = { 0.5: 4, 0.625: 2.5, 0.875: 1.5, 1: 1 };
@@ -60,6 +71,7 @@ export const WEIGHT_LABELS = {
   speed: 'Speed figures', speed_best: 'Best speed figure', mark: 'Average mile time', close: 'Closing quarter',
   early: 'Opening speed', form: 'Recent form', class: 'Class / shippers', year: 'This year record',
   driver: 'Driver', trainer: 'Trainer', post: 'Post position', late: 'Late move (¾→fin)', season_mark: 'Season mark',
+  trend: 'Speed trend', hot: 'Hot/cold driver & trainer', conn: 'Connections & course', offtrack: 'Off-track ability (when Off)',
 };
 
 export const ADJ = {
@@ -194,6 +206,57 @@ function horseMetrics(h, race, today, year) {
   m.driver_udr = h.drv_udr ?? null;
   m.trainer_w = h.trn_w ?? null;
   m.post_rating = h.post_rating ?? null;
+  // speed trend: least-squares slope of speed figures over the last 4 real starts without a break (oldest → newest)
+  const tr = real.filter((p) => p.sr && !p.brk && !p.dnf).slice(0, 4).map((p) => p.sr).reverse();
+  m.sr_seq = tr;
+  if (tr.length >= 3) {
+    const n = tr.length, mx = (n - 1) / 2, my = mean(tr);
+    let num = 0, den = 0;
+    tr.forEach((y, x) => { num += (x - mx) * (y - my); den += (x - mx) ** 2; });
+    m.sr_trend = num / den;
+  } else m.sr_trend = null;
+  // trotters: breaks over the last 10 lines (qualifiers count — manners are manners)
+  const l10 = starts.slice(0, 10);
+  m.brk_l10 = l10.filter((p) => p.brk).length;
+  m.brk_last = !!(starts[0] && starts[0].brk);
+  m.lines_n = l10.length;
+  // hot / cold: last 30 days vs last 365 (Platinum)
+  const shrink = (d, n, k) => (d == null ? null : d * (n / (n + k)));
+  m.drv_hot = h.drv30 && h.drv30.st >= 10 && h.drv30.r != null && h.drv_udr != null ? h.drv30.r - h.drv_udr : null;
+  m.trn_hot = h.trn30 && h.trn30.st >= 4 && h.trn30.r != null && h.trn_utr != null ? h.trn30.r - h.trn_utr : null;
+  m.drv30_st = h.drv30?.st ?? null; m.trn30_st = h.trn30?.st ?? null;
+  m.hot_val = m.drv_hot == null && m.trn_hot == null ? null
+    : (shrink(m.drv_hot, m.drv30_st || 0, 40) || 0) + 0.8 * (shrink(m.trn_hot, m.trn30_st || 0, 10) || 0);
+  // connections & course
+  m.conn_bits = []; let cv = 0, cn = 0;
+  if (h.drtr && h.drtr.st >= 3 && h.drtr.w != null && h.drv_w != null) {
+    const sh = (h.drtr.w * h.drtr.st + h.drv_w * 8) / (h.drtr.st + 8);
+    cv += (sh - h.drv_w) / 100; cn++;
+    m.combo = { st: h.drtr.st, w: h.drtr.w };
+    m.conn_bits.push(`Dr/Tr ${h.drtr.st} starts, ${h.drtr.w}% wins`);
+  }
+  const trk = h.stats.Track;
+  if (trk && trk.starts >= 3 && m.life_top3 != null) {
+    const t3 = (100 * (trk.wins + trk.places + trk.shows)) / trk.starts;
+    cv += ((t3 - m.life_top3) / 100) * (trk.starts / (trk.starts + 5)); cn++;
+    m.course = { ...trk, t3 };
+    m.conn_bits.push(`Here: ${trk.starts} starts ${trk.wins}-${trk.places}-${trk.shows}`);
+  }
+  if (h.new_trainer && h.new_trainer.starts_since <= 1 && h.trn_utr != null) {
+    const d = h.trn_utr - h.new_trainer.prev_utr;
+    cv += 1.5 * d; cn++;
+    m.new_barn = { ...h.new_trainer, d };
+    m.conn_bits.push(`${h.new_trainer.starts_since === 0 ? '1st' : '2nd'} start for new barn (was ${h.new_trainer.prev.split(' ').slice(-1)[0]}, UTR ${h.new_trainer.prev_utr.toFixed(3)} → ${h.trn_utr.toFixed(3)})`);
+  }
+  m.conn_val = cn ? cv : null;
+  // off-track ability (only used when the track is Off)
+  const off = h.stats.Off;
+  m.off_rec = off && off.starts ? off : null;
+  if (off && off.starts >= 2 && m.life_top3 != null) {
+    const t3 = (100 * (off.wins + off.places + off.shows)) / off.starts;
+    m.off_val = ((t3 - m.life_top3) / 100) * (off.starts / (off.starts + 4)) + (h.sire_off && h.sire_off.st >= 50 ? (h.sire_off.w - 13) / 200 : 0);
+    m.off_t3 = t3;
+  } else m.off_val = h.sire_off && h.sire_off.st >= 50 ? (h.sire_off.w - 13) / 200 : null;
   return m;
 }
 
@@ -349,7 +412,7 @@ const keyWinner = (race) => {
   const rk = race.ranked;
   if (rk.length < 2) return false;
   const p1 = rk[0].win_prob, ratio = p1 / rk[1].win_prob;
-  return (race.confidence >= 4 && p1 >= 0.22 && ratio >= 1.35) || (p1 >= 0.26 && ratio >= 1.45);
+  return (race.confidence >= 4 && p1 >= 0.22 && ratio >= 1.35) || (race.confidence >= 3 && p1 >= 0.26 && ratio >= 1.45);
 };
 
 // number of distinct tickets a set of legs covers (each finisher must be a different horse)
@@ -591,14 +654,35 @@ export const FEATURE_VERSION = 1;
 // Score from stored features with any set of multipliers (used to test weight mixes against results).
 export function linearScore(f, mult) {
   const M = { ...DEFAULT_MULT, ...(mult || {}) };
-  let s = 0;
-  for (const [k, v] of Object.entries(f.c)) s += DEFAULT_WEIGHTS[k] * (M[k] ?? 1) * v;
+  let s = 0, ws = 0;
+  for (const k of Object.keys(DEFAULT_WEIGHTS)) {
+    if (k === 'offtrack' && !f.off) continue;
+    const w = DEFAULT_WEIGHTS[k] * (M[k] ?? 1);
+    ws += w;
+    s += w * (f.c[k] ?? 0.5);
+  }
+  if (ws > 0) s *= BASE_SUM / ws;
   for (const [g, v] of Object.entries(f.a)) s += v * (M[g] ?? 1);
   s -= f.p.breaks * M.breaks + f.p.layoff * M.layoff + f.p.thin;
   return s;
 }
 
-export function scoreRace(race, { today, year, mult, driverTable, scratched = [], sim = true }) {
+function postIndex(race, h) {
+  const ps = race.post_stats, post = h.post_no ?? h.pgm;
+  if (ps && ps.fast && ps.fast.win && post >= 1 && post <= ps.fast.win.length) {
+    const i = post - 1;
+    const src = race.cond === 'off' && ps.off && ps.off.starts && ps.off.starts[i] > 50 ? ps.off : ps.fast;
+    if (!src.starts || src.starts[i] > 50) {
+      let v = src.win[i];
+      if (ps.last30 && ps.last30.starts && ps.last30.starts[i] > 50 && race.cond !== 'off') v = 0.75 * v + 0.25 * ps.last30.win[i];
+      return v;
+    }
+  }
+  return h.post_rating ?? null;
+}
+
+export function scoreRace(race, { today, year, mult, driverTable, scratched = [], sim = true, cond = 'fast' }) {
+  race.cond = cond;
   const M = { ...DEFAULT_MULT, ...(mult || {}) };
   const W = Object.fromEntries(Object.entries(DEFAULT_WEIGHTS).map(([k, v]) => [k, v * (M[k] ?? 1)]));
   const grp = (key) => (key === 'lone_speed' || key === 'speed_duel' || key === 'closer_setup' ? 'pace'
@@ -619,9 +703,10 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
     const top = Object.entries(sz).sort((a, b) => b[1] - a[1])[0];
     race.track_size = top ? +top[0] : null;
   }
-  // post matters more the tighter the track: half-mile 4x, 5/8 2.5x, 7/8 1.5x, mile 1x
-  race.post_scale = POST_SCALE[race.track_size] ?? 2;
-  W.post *= race.post_scale;
+  race.post_scale = POST_SCALE[race.track_size] ?? 2;   // used for wording only — the real post index already carries the size effect
+  if (cond !== 'off') W.offtrack = 0;
+  const wsum = Object.values(W).reduce((a, b) => a + b, 0);
+  const wnorm = wsum > 0 ? BASE_SUM / wsum : 1;
   for (const h of hs) h.m = horseMetrics(h, race, today, year);
   const early = hs.filter((h) => h.m.open_pos != null && h.m.open_pos <= 2.5 && h.m.clean_n >= 2 && !h.m.stale);
   race.pace = { early: early.map((h) => h.pgm) };
@@ -656,21 +741,26 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
     early: (() => { const a = norm(col('open_pos'), false), b = norm(col('open_q'), false); return a.map((x, i) => 0.5 * x + 0.5 * b[i]); })(),
     season_mark: norm(hs.map((h) => h.m.yr_mark_adj ?? (h.m.life_mark_adj != null ? h.m.life_mark_adj + 1.0 : null)), false),
     class: norm(col('class_val'), true, 0.4), late: norm(col('late_gain'), true, 0.4), year: norm(col('year_score')),
-    driver: norm(col('driver_udr')), trainer: norm(col('trainer_w')), post: norm(col('post_rating'), true, 0.5),
+    driver: norm(col('driver_udr')), trainer: norm(col('trainer_w')),
+    post: hs.map((h) => { const v = postIndex(race, h); h.m.post_idx = v; return v == null ? 0.5 : Math.max(0, Math.min(1, 0.5 + v / 130)); }),
+    trend: norm(col('sr_trend'), true, 0.45), hot: norm(col('hot_val'), true, 0.5), conn: norm(col('conn_val'), true, 0.5),
+    offtrack: norm(col('off_val'), true, 0.45),
   };
   hs.forEach((h, i) => {
     const m = h.m;
     let s = 0;
     for (const k of Object.keys(W)) s += W[k] * (comp[k] ? comp[k][i] : 0);
-    const brk = Math.min(10, 4 * m.brk_l5);
+    s *= wnorm;
+    const trot = race.gait === 'TROT';
+    const brk = trot ? Math.min(16, 5 * m.brk_l5 + 2 * (m.brk_l10 - m.brk_l5) + (m.brk_last ? 3 : 0)) : Math.min(10, 4 * m.brk_l5);
     let lay = 0;
     if (m.days_real != null && m.days_real > 180) lay += m.qual_since ? 6 : 10;
     else if (m.days_real != null && m.days_real > 45) lay += m.qual_since ? 3 : 6;
     if (m.stale) lay += 3;
     const thin = m.clean_n <= 1 ? 4 : 0;
     const pen = brk * M.breaks + lay * M.layoff + thin;
-    h.feat = { c: Object.fromEntries(Object.keys(DEFAULT_WEIGHTS).map((k) => [k, comp[k] ? +(comp[k][i] * (k === 'post' ? race.post_scale : 1)).toFixed(4) : 0])),
-      a: { ...m.adjRaw }, p: { breaks: brk, layoff: lay, thin } };
+    h.feat = { c: Object.fromEntries(Object.keys(DEFAULT_WEIGHTS).map((k) => [k, comp[k] ? +comp[k][i].toFixed(4) : 0])),
+      a: { ...m.adjRaw }, p: { breaks: brk, layoff: lay, thin }, off: cond === 'off' };
     const bonus = m.adj.reduce((a, [, v]) => a + v, 0);
     h.score = pyRound(s - pen + bonus, 1);
     h.bonus = bonus; h.penalty = pen;
@@ -774,8 +864,48 @@ function prosCons(h, hs, race, year) {
     const how = t.finish === 1 ? 'won' : `finished ${t.finish}` + (t.beaten ? `, beaten ${lengths(t.beaten)}` : '');
     P(`Tough-trip credit: parked/first-over ${t.date.slice(0, 5)} and still ${how}`, t.finish === 1 ? 3 : 2);
   }
-  if (m.brk_l5 >= 2) C(`Broke in ${m.brk_l5} of last 5`, 3);
+  if (race.gait === 'TROT') {
+    if (m.brk_l10 >= 2) C(`Breaker: broke in ${m.brk_l10} of last ${m.lines_n}${m.brk_last ? ', including last start' : ''}`, 3);
+    else if (m.brk_l10 === 1) C(`Broke stride in 1 of last ${m.lines_n}${m.brk_last ? ' (last start)' : ''}`, m.brk_last ? 3 : 2);
+    else if (m.lines_n >= 6) P(`Clean-gaited: no breaks in last ${m.lines_n}`, 2);
+  } else if (m.brk_l5 >= 2) C(`Broke in ${m.brk_l5} of last 5`, 3);
   else if (m.brk_l5 === 1) C('Broke stride in 1 of last 5', 1);
+  // speed trend
+  if (m.sr_trend != null) {
+    const seq = m.sr_seq.join(' → ');
+    if (m.sr_trend >= 2.5) P(`Improving: speed figures ${seq}`, m.sr_trend >= 4 ? 3 : 2);
+    else if (m.sr_trend <= -2.5) C(`Declining: speed figures ${seq}`, m.sr_trend <= -4 ? 3 : 2);
+  }
+  // hot / cold connections (last 30 days vs the year)
+  if (m.drv_hot != null && m.drv30_st >= 15) {
+    if (m.drv_hot >= 0.06) P(`Hot driver: UDR ${h.drv30.r.toFixed(3)} last 30 days (year ${h.drv_udr.toFixed(3)})`, m.drv_hot >= 0.1 ? 3 : 2);
+    else if (m.drv_hot <= -0.06) C(`Cold driver: UDR ${h.drv30.r.toFixed(3)} last 30 days (year ${h.drv_udr.toFixed(3)})`, m.drv_hot <= -0.1 ? 3 : 2);
+  }
+  if (m.trn_hot != null && m.trn30_st >= 6) {
+    if (m.trn_hot >= 0.08) P(`Hot barn: UTR ${h.trn30.r.toFixed(3)} last 30 days (year ${h.trn_utr.toFixed(3)})`, m.trn_hot >= 0.15 ? 3 : 2);
+    else if (m.trn_hot <= -0.08) C(`Cold barn: UTR ${h.trn30.r.toFixed(3)} last 30 days (year ${h.trn_utr.toFixed(3)})`, m.trn_hot <= -0.15 ? 3 : 2);
+  }
+  // connections & course
+  if (m.combo && m.combo.st >= 5) {
+    if (m.combo.w >= 25 && m.combo.w >= (h.drv_w || 0) + 8) P(`Driver/trainer team wins ${m.combo.w}% together (${m.combo.st} starts)`, 2);
+    else if (m.combo.st >= 10 && m.combo.w <= 5) C(`Driver/trainer team ${m.combo.w}% together (${m.combo.st} starts)`, 1);
+  }
+  if (m.course && m.course.starts >= 4) {
+    if (m.course.t3 >= 50 && m.course.t3 >= (m.life_top3 || 0) + 10) P(`Likes this track: ${m.course.starts} starts ${m.course.wins}-${m.course.places}-${m.course.shows} here`, 2);
+    else if (m.course.starts >= 6 && m.course.t3 <= 20) C(`Poor record here: ${m.course.starts} starts ${m.course.wins}-${m.course.places}-${m.course.shows}`, 2);
+  }
+  if (m.new_barn) {
+    const nb = m.new_barn, which = nb.starts_since === 0 ? 'First' : 'Second';
+    if (nb.d >= 0.05) P(`${which} start for a better barn (UTR ${nb.prev_utr.toFixed(3)} → ${h.trn_utr.toFixed(3)})`, nb.d >= 0.1 ? 3 : 2);
+    else if (nb.d <= -0.05) C(`${which} start for a weaker barn (UTR ${nb.prev_utr.toFixed(3)} → ${h.trn_utr.toFixed(3)})`, 2);
+  }
+  // off-track ability, only when the track is off
+  if (race.cond === 'off' && m.off_rec) {
+    const o = m.off_rec;
+    if (o.starts >= 3 && m.off_t3 >= 50) P(`Handles off tracks: ${o.starts} starts ${o.wins}-${o.places}-${o.shows}`, 3);
+    else if (o.starts >= 3 && m.off_t3 <= 15) C(`Struggles on off tracks: ${o.starts} starts ${o.wins}-${o.places}-${o.shows}`, 3);
+    if (h.sire_off && h.sire_off.st >= 100 && h.sire_off.w >= 17) P(`Sire's foals win ${h.sire_off.w}% on off tracks`, 1);
+  }
   if (m.days_real != null && m.days_real > 45) C(`Off ${m.days_real} days since last race${m.qual_since ? ' (qualified since)' : ''}`, m.qual_since ? 2 : 3);
   if (m.clean_n <= 1) C(`Only ${m.clean_n} clean line(s) in last 5 — little to go on`, 2);
   const ys = m.yr_starts, yw = m.yr_wins;
@@ -786,16 +916,17 @@ function prosCons(h, hs, race, year) {
     if (m.driver_udr >= 0.300 && !upgraded) P(`Top driver ${h.driver} (UDR ${m.driver_udr.toFixed(3)})`, 2);
     else if (m.driver_udr < 0.160) C(`Low-percentage driver (UDR ${m.driver_udr.toFixed(3)})`, 1);
   }
-  if (m.trainer_w != null) {
-    if (m.trainer_w >= 20) P(`Hot barn: trainer wins ${m.trainer_w}%`, 1);
-    else if (m.trainer_w <= 5) C(`Cold barn: trainer wins ${m.trainer_w}%`, 1);
+  if (m.trainer_w != null && m.trn_hot == null) {
+    if (m.trainer_w >= 20) P(`Strong barn: trainer wins ${m.trainer_w}%`, 1);
+    else if (m.trainer_w <= 5) C(`Weak barn: trainer wins ${m.trainer_w}%`, 1);
   }
-  const prt = m.post_rating;
+  const prt = m.post_idx != null ? Math.round(m.post_idx) : null;
   if (prt != null) {
-    const tight = (race.post_scale || 1) >= 2.5;   // half-mile or 5/8 track
+    const pn = h.post_no ?? h.pgm;
     const trkTxt = race.track_size === 0.5 ? ' on a half-mile track' : race.track_size === 0.625 ? ' on a ⅝ track' : '';
-    if (prt >= 20) P(`Good post (PP${h.pgm} rating +${prt})${tight ? trkTxt : ''}`, tight && prt >= 40 ? 3 : tight ? 2 : 1);
-    else if (prt <= -20) C(`Tough post (PP${h.pgm} rating ${prt})${tight ? trkTxt : ''}`, tight && prt <= -40 ? 3 : prt <= -30 || tight ? 2 : 1);
+    const src = race.post_stats ? 'track win index' : 'rating';
+    if (prt >= 20) P(`Good post: PP${pn} (${src} +${prt})${trkTxt}`, prt >= 40 ? 3 : 2);
+    else if (prt <= -20) C(`Tough post: PP${pn} (${src} ${prt})${trkTxt}`, prt <= -40 ? 3 : 2);
   }
   const lg = m.late_gain;
   if (lg != null && m.late_pairs.length >= 2) {
@@ -805,7 +936,7 @@ function prosCons(h, hs, race, year) {
   }
   if (h.equip_note) P(h.equip_note.charAt(0) + h.equip_note.slice(1).toLowerCase().replace('lasix', 'Lasix'), 1);
   pros.sort((a, b) => b[1] - a[1]); cons.sort((a, b) => b[1] - a[1]);
-  return [pros.slice(0, 3), cons.slice(0, 3)];
+  return [pros.slice(0, 4), cons.slice(0, 4)];
 }
 
 export function scoreCard(card, opts = {}) {
@@ -813,7 +944,7 @@ export function scoreCard(card, opts = {}) {
   const year = new Date(today).getUTCFullYear();
   const driverTable = cardDriverTable(card);
   for (const r of card.races) {
-    scoreRace(r, { today, year, mult: opts.mult, driverTable, scratched: (opts.scratches || {})[r.number] || [] });
+    scoreRace(r, { today, year, mult: opts.mult, driverTable, scratched: (opts.scratches || {})[r.number] || [], cond: opts.cond || 'fast' });
   }
   return card;
 }

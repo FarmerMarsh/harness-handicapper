@@ -398,3 +398,16 @@ details summary { cursor: pointer; margin-top: 8px; }
 .overlay-box p { max-width: 340px; margin: 8px auto 12px; }
 .print-root table.ht { min-width: 0; }
 .tmr { color: var(--muted); } .tmr .hv { font-weight: 700; }
+
+/* summary card + condition */
+.condbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 10px; }
+.summary { margin-bottom: 14px; }
+.sum-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px; margin-bottom: 6px; }
+.sum-head h2 { margin: 0; font-size: 17px; color: var(--navy); }
+.sgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px 16px; }
+.sbox h3 { margin: 4px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.sbox ol, .sbox ul { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.45; }
+.sbox ul.plain { list-style: none; padding-left: 0; }
+.sbox a { text-decoration: none; }
+.sbox a:hover b { text-decoration: underline; }
+.conn { color: #4b5a72; }

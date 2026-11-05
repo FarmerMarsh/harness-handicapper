@@ -164,7 +164,7 @@ function clusterRows(ws, anchors) {
 }
 
 function parseStatsBox(ws) {
-  const labels = ws.filter((w) => w.text === 'Life' || w.text === 'Off' || (/^20\d\d$/.test(w.text) && w.x0 > 465 && w.x0 < 480))
+  const labels = ws.filter((w) => w.text === 'Life' || w.text === 'Off' || (w.text === 'Track' && w.x0 > 465 && w.x0 < 480) || (/^20\d\d$/.test(w.text) && w.x0 > 465 && w.x0 < 480))
     .sort((a, b) => a.top - b.top);
   const res = {};
   for (const lab of labels) {
@@ -223,6 +223,17 @@ export async function parseProgram(pdfDoc) {
     const head = ws.filter((w) => w.top < 28).sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ');
     const hm = head.match(/([A-Z ]+?)\s+-\s+([A-Z]+DAY, [A-Z]+ \d+, \d{4})/);
     if (hm && !card.track) { card.track = titleCase(hm[1].trim()); card.date = titleCase(hm[2]); }
+    if (!card.post_stats && ws.some((w) => w.text === 'POSITION') && ws.some((w) => w.text === 'STATISTICS')) {
+      const hdr = ws.find((w) => w.text === 'STATISTICS');
+      const stop = ws.find((w) => w.text === 'DRIVERS' && w.top > hdr.top);
+      const rowsBy = {};
+      for (const w of ws) if (w.x0 > 355 && w.x0 < 595 && w.top > hdr.top + 4 && (!stop || w.top < stop.top - 4) && /^-?\d+$/.test(w.text)) (rowsBy[Math.round(w.top)] ||= []).push(w);
+      const rowsN = Object.keys(rowsBy).map(Number).sort((a, b) => a - b).map((t) => rowsBy[t].sort((a, b) => a.x0 - b.x0).map((w) => +w.text)).filter((r) => r.length >= 8);
+      // first row of numbers is the post header 1..10, then win% / roi% / starts for fast, off and last-30 tracks
+      const body = rowsN[0] && rowsN[0].every((x, i) => x === i + 1) ? rowsN.slice(1) : rowsN;
+      const block = (i) => (body[i * 3] ? { win: body[i * 3], roi: body[i * 3 + 1] || null, starts: body[i * 3 + 2] || null } : null);
+      card.post_stats = { fast: block(0), off: block(1), last30: block(2) };
+    }
     const rn = ws.filter((w) => w.size > 33 && w.top < 45 && isDigits(w.text));
     const footTxt = ws.filter((w) => w.top > height - 40).sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ');
     const fm = footTxt.match(/Race (\d+)\s*-\s*Page/);
@@ -295,6 +306,20 @@ export async function parseProgram(pdfDoc) {
         const num = (t, re) => { const x = t && t.match(re); return x ? parseFloat(x[1]) : null; };
         if (dS) { h.drv_st = num(dS, /St\s+(\d+)/); h.drv_w = num(dS, /W\s+(\d+)%/); h.drv_udr = num(dS, /UDR\s+([.\d]+)/); }
         if (tS) { h.trn_st = num(tS, /St\s+(\d+)/); h.trn_w = num(tS, /W\s+(\d+)%/); h.trn_utr = num(tS, /UTR\s+([.\d]+)/); }
+        const pack = (t, key) => (t ? { st: num(t, /St\s+(\d+)/), w: num(t, /W\s+(\d+)%/), itm: num(t, /ITM\s+(\d+)%/), r: num(t, new RegExp(key + '\\s+([.\\d]+)')) } : null);
+        h.drv30 = pack(statLine('Last30', 40, 60), 'UDR');
+        h.trn30 = pack(statLine('Last30', 230, 250), 'UTR');
+        h.drv_horse = pack(statLine('Horse', 40, 60), 'UDR');
+        h.trn_horse = pack(statLine('Horse', 230, 250), 'UTR');
+        h.drtr = pack(statLine('Dr/Tr', 425, 440), 'x');
+        h.sire_off = pack(statLine('SireOff', 425, 440), 'x');
+        h.dam_off = pack(statLine('DamOff', 425, 440), 'x');
+        // trainer changes: "Trainer change from NAME (St 386 W 21% ... UTR .348) after 06Oct26"
+        h.trainer_changes = bw.filter((w) => w.text === 'change' && w.x0 > 120 && w.x0 < 160).map((cw) => {
+          const t = bw.filter((w) => Math.abs(w.top - cw.top) < 2).sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ');
+          const m = t.match(/from (.+?) \(St (\d+) W (\d+)%.*?UTR ([.\d]+)\) after (\d\d[A-Z][a-z]{2}\d\d)/);
+          return m ? { top: cw.top, prev: titleCase(m[1]), prev_st: +m[2], prev_w: +m[3], prev_utr: parseFloat(m[4]), after: m[5] } : null;
+        }).filter(Boolean).sort((a, b) => a.top - b.top);
         const l5 = bw.filter((w) => w.text.startsWith('$') && w.x0 > 560 && w.top > dl.top - 2 && w.top < dl.top + 12).map((w) => w.text);
         if (l5.length) h.earn_l5 = parseInt(l5[l5.length - 1].replace(/[$,]/g, ''), 10);
         const firstPP = bw.filter((w) => w.x0 >= 55 && w.x0 < 66 && /^\d\d[A-Z][a-z]{2}\d\d$/.test(w.text)).map((w) => w.top);
@@ -323,6 +348,8 @@ export async function parseProgram(pdfDoc) {
       h.stats = parseStatsBox(bw);
       h.post_rating = null;
       for (const w of bw.filter((w) => w.text.startsWith('PP') && w.x0 < 30)) {
+        const pn = w.text.match(/^PP(\d+)/);
+        if (pn) h.post_no = +pn[1];
         const nxt = bw.find((x) => Math.abs(x.top - w.top) < 1 && x.x0 > 30 && x.x0 < 45);
         if (nxt) { const r = nxt.text.match(/([+-]?\d+)/); if (r) h.post_rating = parseInt(r[1], 10); }
       }
@@ -332,10 +359,15 @@ export async function parseProgram(pdfDoc) {
         .map((w) => Math.round(w.top * 10) / 10))].sort((a, b) => a - b);
       const rows = anchors.length ? clusterRows(bw.filter((w) => w.top > rowsStart - 2 && w.x0 > 45), anchors) : new Map();
       h.pp = anchors.map((a) => parsePPRow(rows.get(a)));
+      if (h.trainer_changes && h.trainer_changes.length) {
+        const tc = h.trainer_changes[0];
+        h.new_trainer = { ...tc, starts_since: anchors.filter((a) => a < tc.top).length };
+      }
       horses.push(h);
     });
     if (!isCont) card.races.push(race);
   }
   card.races.sort((a, b) => a.number - b.number);
+  if (card.post_stats) for (const r of card.races) r.post_stats = card.post_stats;
   return card;
 }

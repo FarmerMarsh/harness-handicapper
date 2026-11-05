@@ -1,9 +1,9 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=6';
+import { parseProgram, fmtTime } from './parse.js?v=7';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
-} from './engine.js?v=6';
+} from './engine.js?v=7';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -78,6 +78,8 @@ function weightsText(mult = S.mult) {
   return 'Custom weights: ' + customList(mult).map(([l, x]) => `${l} ${multText(x)}`).join(', ');
 }
 function weightsBadge() {
+  const prof = activeProfile();
+  if (prof) return `<a class="pill key" href="#/settings" title="${esc(weightsText(prof.mult))}">Track profile: ${esc(S.card.track)} (${prof.n} races)</a>`;
   const pk = presetName();
   if (pk === 'normal') return `<a class="pill" href="#/settings">Weights: Normal</a>`;
   if (pk) return `<a class="pill key" href="#/settings">Weights: ${esc(PRESETS[pk].label)}</a>`;
@@ -151,8 +153,15 @@ function rescoreAll() {
   for (const r of S.card.races) scoreOne(r);
   S.bets = multiRaceBets(S.card).filter((b) => b.races.every((n) => raceOf(n)));
 }
+const PROFILE_KEY = 'hh:profiles';   // { trackName: { mult, n, hits, made } }
+function activeProfile() {
+  if (!S.card || !S.prefs.useProfiles) return null;
+  const p = LS.get(PROFILE_KEY, {})[S.card.track];
+  return p && p.mult ? p : null;
+}
+function effMult() { const p = activeProfile(); return p ? { ...DEFAULT_MULT, ...p.mult } : S.mult; }
 function scoreOne(r) {
-  scoreRace(r, { today: S.today, year: S.year, mult: S.mult, driverTable: S.driverTable, scratched: S.st.scratches[r.number] || [] });
+  scoreRace(r, { today: S.today, year: S.year, mult: effMult(), driverTable: S.driverTable, scratched: S.st.scratches[r.number] || [], cond: S.st.cond || 'fast' });
 }
 const saveState = () => LS.set(stateKey(S.key), S.st);
 
@@ -274,7 +283,10 @@ function renderCard() {
     <div class="row"><button class="btn small primary" data-act="email">Email PDF</button><button class="btn small" data-act="pdf">Download PDF</button><button class="btn small" data-act="print">Print</button>
       ${S.bets.length ? '<a class="btn small" href="#/picks">Pick 3/4/5 tickets</a>' : ''}<a class="btn small" href="#/results">Enter results</a><button class="btn small" data-act="new">Load another program</button></div>
   </div>
-  <div class="bestbets"><b>Best bets:</b> ${best.map((r) => `<a href="#/race/${r.number}"><b>R${r.number}</b> #${r.ranked[0].pgm} ${esc(tc(r.ranked[0].name))}</a> (${r.confidence}/5)`).join(' &nbsp;·&nbsp; ')}</div>
+  <div class="condbar"><span class="note">Track today:</span><div class="seg" role="group" aria-label="Track condition">
+    <button data-cond="fast" class="${(S.st.cond || 'fast') === 'fast' ? 'on' : ''}">Fast</button><button data-cond="off" class="${S.st.cond === 'off' ? 'on' : ''}">Off (good / sloppy / muddy)</button></div>
+    <span class="note">${S.st.cond === 'off' ? 'Off-track records, sire off-track stats and the off-track post stats now count.' : 'Switch to Off if the track comes up wet — it re-ranks every race.'}</span></div>
+  ${summaryCard()}
   <div class="races">
     ${c.races.map((r) => {
       const rk = r.ranked;
@@ -290,6 +302,23 @@ function renderCard() {
       </a>`;
     }).join('')}
   </div>`;
+}
+
+function summaryCard() {
+  const H = cardHighlights();
+  const box = (title, inner) => `<div class="sbox"><h3>${title}</h3>${inner}</div>`;
+  const lnk = (n, html) => `<a href="#/race/${n}">${html}</a>`;
+  const ol = (items) => (items.length ? `<ol>${items.join('')}</ol>` : '<p class="note">None on this card.</p>');
+  return `<section class="panel summary" aria-label="Card summary"><div class="sum-head"><h2>Summary</h2><span class="note">${esc(weightsText(effMult()))}</span></div><div class="sgrid">
+    ${box('Best bets', ol(H.best.map((r) => { const h = r.ranked[0]; return `<li>${lnk(r.number, `<b>R${r.number} #${h.pgm} ${esc(tc(h.name))}</b>`)} <span class="muted">ML ${esc(h.ml)} · line ${esc(h.line)} · ${r.confidence}/5</span></li>`; })))}
+    ${box('Best trifectas', ol(H.tris.map((r) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(tc(r.trifecta.type))} ${esc(r.trifecta.text)}</b>`)} <span class="muted">${dollars(r.trifecta.cost)} · ~${Math.round(r.trifecta.hit * 100)}%</span></li>`)))}
+    ${box('Best exactas', ol(H.exs.map((r) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(tc(r.exacta.type))} ${esc(r.exacta.text)}</b>`)} <span class="muted">${dollars(r.exacta.cost)} · ~${Math.round(r.exacta.hit * 100)}%</span></li>`)))}
+    ${box('Superfectas', ol(H.sups.map((r) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(tc(r.superfecta.type))} ${esc(r.superfecta.text)}</b>`)} <span class="muted">${dollars(r.superfecta.cost)} · ~${Math.round(r.superfecta.hit * 100)}%</span></li>`)))}
+    ${box('<span class="gv">Good value</span> <span class="muted">ML → our line</span>', ol(H.good.slice(0, 6).map(({ r, h }) => `<li>${lnk(r.number, `<b>R${r.number} #${h.pgm} ${esc(tc(h.name))}</b>`)} ${esc(h.ml.replace('/', '-'))} → <b>${esc(h.line)}</b></li>`)))}
+    ${box('<span class="bv">Bad value</span> <span class="muted">bet against</span>', ol(H.bad.slice(0, 6).map(({ r, h }) => `<li>${lnk(r.number, `<b>R${r.number} #${h.pgm} ${esc(tc(h.name))}</b>`)} ${esc(h.ml.replace('/', '-'))} → <b>${esc(h.line)}</b></li>`)))}
+    ${box('Longshot trifectas', ol(H.longs.slice(0, 6).map(({ r, l }) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(l.text)}</b>`)} <span class="muted">${dollars(l.cost)} · ${esc(l.label)}</span></li>`)))}
+    ${box('Pick 3 / 4 / 5 &amp; doubles', H.plans.length ? `<ul class="plain">${H.plans.map(({ b, t, alt }) => `<li>${t.verdict === 'PLAY' ? '<b class="gv">PLAY</b>' : '<span class="muted">PASS</span>'} <a href="#/picks">${esc(b.name)} R${b.races[0]}–${b.races[b.races.length - 1]}</a>${t.verdict === 'PLAY' ? ` ${ticketLine(t)} = <b>${dollars(t.cost)}</b>` : alt ? ` <span class="muted">· plays at $10</span>` : ''}</li>`).join('')}</ul>` : '<p class="note">No multi-race wagers on this card.</p>')}
+  </div></section>`;
 }
 
 // ---------------- render: race ----------------
@@ -337,6 +366,14 @@ function tmLine(h, hl) {
   return `<span class="tmr">TM ${[one('Power', t.power, 'tmp'), one('Speed', t.speed, 'tms'), one('Pace', t.pace, 'tmc'), one('Class', t.class, 'tmk')].filter(Boolean).join(' · ')}</span>`;
 }
 
+// connections & course on one line: driver/trainer team, record here, new barn
+function connLine(h, cls = 'h-extra') {
+  const b = h.m && h.m.conn_bits;
+  if (!b || !b.length) return '';
+  const tag = cls === 's' ? 'span' : 'div';
+  return `<${tag} class="${cls} conn">${esc(b.join(' · '))}</${tag}>`;
+}
+
 function extraLine(h) {
   const m = h.m, x = [];
   if (h.claim) x.push(`clm ${h.claim}`);
@@ -356,7 +393,7 @@ function horseCard(h, r, scr, hl) {
       <div class="h-pgm">${h.pgm}</div>
       <div style="min-width:0"><div class="h-name">${esc(tc(h.name))} ${scr ? '' : valueTag(h)}</div>
         <div class="h-sub">${esc(tc(h.driver))}${h.drv_w != null ? ` (${h.drv_w}%)` : ''} · ${esc(tc(h.trainer))}${h.trn_w != null ? ` (${h.trn_w}%)` : ''}</div>
-        <div class="h-extra">${esc(extraLine(h))}</div>${scr ? '' : `<div class="h-extra">${tmLine(h, hl)}</div>`}</div>
+        <div class="h-extra">${esc(extraLine(h))}</div>${scr ? '' : `<div class="h-extra">${tmLine(h, hl)}</div>${connLine(h)}`}</div>
       <div class="h-right">${proj}<div class="h-ml">ML ${esc(h.ml)}${!scr && h.line ? ` · line ${esc(h.line)}` : ''}</div></div>
     </div>
     ${scr || !h.m ? '' : `<div class="h-stats">${statCells(h, hl).map(([k, v, s]) => `<div class="st"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('')}</div>
@@ -377,7 +414,7 @@ function horseTable(r, sorted, scrSet, forPrint = false) {
     const vt = scr ? '' : h.value === 'good' ? '<span class="s gv">good value</span>' : h.value === 'bad' ? '<span class="s bv">bad value</span>' : '';
     return `<tr class="${cls}">
       <td>${scrCell}</td><td><b style="font-size:1.15em">${h.pgm}</b></td>
-      <td class="l"><span class="h-name"><b>${esc(tc(h.name))}</b></span><span class="s">${esc(tc(h.driver))} · ${esc(tc(h.trainer))}</span><span class="s faint">${esc(extraLine(h))}</span>${scr ? '' : `<span class="s">${tmLine(h, hl)}</span>`}</td>
+      <td class="l"><span class="h-name"><b>${esc(tc(h.name))}</b></span><span class="s">${esc(tc(h.driver))} · ${esc(tc(h.trainer))}</span><span class="s faint">${esc(extraLine(h))}</span>${scr ? '' : `<span class="s">${tmLine(h, hl)}</span>${connLine(h, 's')}`}</td>
       <td>${esc(h.ml)}${vt}</td>
       <td>${scr ? 'SCR' : `<b>${h.rank}</b><span class="s">${Math.round(h.win_prob * 100)}%</span>`}</td>
       ${[0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => `<td>${c(i)}</td>`).join('')}
@@ -680,9 +717,10 @@ function renderRecord() {
 
 // ---------------- weight suggestions ----------------
 const MIN_RACES = 30, GOOD_RACES = 100;
-function trainingRows() {
+function trainingRows(track = null) {
   const rows = [];
-  for (const [, st] of allStates()) {
+  for (const [key, st] of allStates()) {
+    if (track && key.split('|')[0] !== track) continue;
     for (const [rn, fin] of Object.entries(st.results || {})) {
       const snap = st.snaps && st.snaps[rn];
       const w = (fin || []).find(Boolean);
@@ -722,8 +760,8 @@ function fitMult(rows, start) {
   }
   return m;
 }
-function runSuggestion() {
-  const rows = trainingRows();
+function runSuggestion(track = null) {
+  const rows = trainingRows(track);
   if (rows.length < MIN_RACES) return { n: rows.length };
   const folds = 5;
   let hitsSug = 0, hitsCur = 0, hitsNorm = 0, llSug = 0, llCur = 0;
@@ -736,6 +774,27 @@ function runSuggestion() {
   }
   const final = fitMult(rows, DEFAULT_MULT);
   return { n: rows.length, final, hitsSug, hitsCur, hitsNorm, llGain: (llSug - llCur) / rows.length, ran: Date.now() };
+}
+function profilesHtml() {
+  const counts = {};
+  for (const [key, st] of allStates()) {
+    const t = key.split('|')[0];
+    for (const [rn, fin] of Object.entries(st.results || {})) if ((fin || []).some(Boolean) && st.snaps && st.snaps[rn] && st.snaps[rn].feat) counts[t] = (counts[t] || 0) + 1;
+  }
+  const profs = LS.get(PROFILE_KEY, {});
+  const tracks = [...new Set([...Object.keys(counts), ...Object.keys(profs), ...(S.card ? [S.card.track] : [])])].filter(Boolean).sort();
+  const rows = tracks.map((t) => {
+    const n = counts[t] || 0, p = profs[t];
+    const diff = p ? customList({ ...DEFAULT_MULT, ...p.mult }) : [];
+    return `<tr><td><b>${esc(t)}</b></td><td>${n} graded</td>
+      <td>${p ? (diff.length ? diff.map(([l, x]) => `<span class="pill ${x > 1 ? 'value' : 'badv'}">${esc(l)} ${multText(x)}</span>`).join(' ') : 'normal weights') : '<span class="muted">—</span>'}</td>
+      <td>${n >= MIN_RACES ? `<button class="btn small" data-learn="${esc(t)}">${p ? 'Re-learn' : 'Learn this track'}</button>` : `<span class="note">needs ${MIN_RACES - n} more</span>`}${p ? ` <button class="btn small" data-unlearn="${esc(t)}">Clear</button>` : ''}</td></tr>`;
+  }).join('');
+  return `<div class="panel"><h3>Track profiles</h3>
+    <p class="note">Each track gets its own learned weights from the races you've graded there (${MIN_RACES}+ races to start, 100+ to trust). When on, a card from that track uses its profile instead of your general weights.</p>
+    <label class="row note"><input type="checkbox" data-act="toggle-profiles" ${S.prefs.useProfiles ? 'checked' : ''}> Use track profiles automatically</label>
+    <table class="rec"><thead><tr><th>Track</th><th>Results</th><th>Profile</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">No graded races yet.</td></tr>'}</tbody></table>
+    <p class="note" id="learnOut"></p></div>`;
 }
 function suggestionHtml() {
   const n = trainingRows().length;
@@ -765,12 +824,14 @@ function methodHtml() {
   <p><b>Mile-adjusted times (*)</b>: every time is converted to a mile-track equivalent (half-mile −2.0s, ⅝ −1.0s, ⅞ −0.4s; quarters get ¼ of that), then corrected for the program's track variant (0.2s per point, capped at ±1.6s), which also covers off tracks.</p>
   <p><b>Avg mark</b>: average final time over the last 5 starts, throwing out breaks, parked-out trips (3-wide at any call or first-over at 3+ calls), qualifiers and DNFs — only races from the last 120 days when there are any.</p>
   <p><b>Open ¼</b>: estimated time at the first quarter (leader's quarter + 0.2s per length behind) and average position there. <b>Close ¼</b>: the horse's own last quarter. <b>¾→Fin</b>: average spots gained or lost from the 3/4 call to the wire. <b>Avg fin L3</b>: average finish over the last 3 real starts.</p>
-  <p><b>Post position</b> uses the program's post rating and counts more on tighter tracks — half-mile 4×, ⅝ 2.5×, ⅞ 1.5×, mile 1× — on top of your own post setting. <b>TM ratings</b> (Power, Speed, Pace, Class) are TrackMaster's own numbers from Platinum programs; they're shown for reference and highlighted, but not scored.</p>
+  <p><b>Post position</b> uses the track's real win rate from each post — from the program's post-position table when it has one (fast or off track, blended 75/25 with the last 30 days), otherwise each horse's post rating. Tracks where post matters more (half-miles) have bigger swings, so post counts for more there automatically.</p>
+  <p><b>Speed trend</b>: the slope of speed figures over the last 3–4 starts without a break — rising horses get credit, sliding ones lose it. <b>Hot / cold</b>: driver UDR and trainer UTR over the last 30 days vs the year. <b>Connections &amp; course</b>: the driver/trainer team's record together, the horse's record at this track, and a first or second start for a new barn (better or weaker trainer). <b>Off-track</b> (only when the track is set to Off): the horse's off-track record vs its overall record, plus the sire's off-track win rate. <b>Trotters</b>: breaks count over the last 10 lines (qualifiers too), a break last time adds more, and a trotter with no breaks in its last 6+ starts gets a pro.</p>
+  <p> <b>TM ratings</b> (Power, Speed, Pace, Class) are TrackMaster's own numbers from Platinum programs; they're shown for reference and highlighted, but not scored.</p>
   <p><b>Green / red</b>: the best and worst number in the race for each column (marks compared mile-adjusted; win % needs 5+ lifetime or 3+ this-year starts).</p>
   <p><b>Class</b>: average class rating of the last 3 races versus today's, plus a circuit adjustment for shippers (Yonkers, the Meadowlands and Mohawk tougher; Vernon, Tioga, fairs softer).</p>
   <p><b>Added points</b>: lone speed +${ADJ.lone_speed}, closer with a hot pace +${ADJ.closer_setup}, driver upgrade +${ADJ.driver_up}/+${ADJ.driver_up_big}, tough trip that still finished close +${ADJ.tough_trip} each (max +${ADJ.tough_trip_cap}); speed duel ${ADJ.speed_duel}, driver downgrade ${ADJ.driver_down}. Penalties for breaks, layoffs, stale form and thin data.</p>
   <p><b>Winner confidence</b> blends the top pick's points margin with data quality. <b>Undercard</b> rates how often the projected 2nd–5th finish within one spot of projection in 40,000 simulated races.</p>
-  <p><b>Trifecta call</b>: KEY the top pick over the next three when he stands alone (4/5+ confidence and 30%+ to win, or 28%+ and at least 1.8× the second choice); otherwise BOX the top three. Exacta follows the same call; superfecta keys over four when the undercard is 3/5+, boxes four when it's 4/5+, else passes.</p>
+  <p><b>Trifecta call</b>: KEY the top pick over the next three when he stands alone (4/5 confidence, 22%+ to win and 1.35× the second choice — or 3/5+, 26%+ and 1.45×); otherwise BOX the top three. Exacta follows the same call; superfecta keys over four when the undercard is 3/5+, boxes four when it's 4/5+, else passes.</p>
   <p><b>Value</b>: <span class="gv">good value</span> = the numbers rate a horse at least 2 spots better than the morning line does, at 4/1 or higher. <span class="bv">Bad value</span> = one of the morning line's top 3 choices the numbers rate at least 2 spots worse. <b>Longshot trifectas</b> are built around the good-value horses: the tickets the model gives a real chance that the morning line prices much lower (model % vs ML %).</p>
   <p><b>Multi-race tickets</b> single a horse when he's 5/5 and 35%+ (or clears the style's coverage alone) and otherwise add horses in projected order until the leg covers 45% (tight), 60% (balanced) or 75% (wide) of the model's win chance.</p>
   <p><b>Opening speed</b> combines average position at the first quarter with the estimated opening-quarter time. <b>Season / lifetime mark</b> uses this year's mark, mile-adjusted (the lifetime mark, slightly discounted, if there's none this year).</p>
@@ -788,6 +849,7 @@ function renderSettings() {
     <div class="row"><label class="note" for="emailTo">Send-to address(es) for Email PDF — separate with commas (used when your browser opens an email draft)</label></div>
     <div class="row"><input id="emailTo" class="txt" type="email" multiple value="${esc(S.prefs.emailTo)}" placeholder="you@example.com, friend@example.com"><button class="btn" data-act="save-email">Save</button><span class="note" id="emailSaved"></span></div></div>
   <div style="margin-top:12px">${suggestionHtml()}</div>
+  <div style="margin-top:12px">${profilesHtml()}</div>
   <div style="margin-top:12px">${methodHtml()}</div>`;
 }
 
@@ -844,6 +906,10 @@ function cardHighlights() {
   const best = [...races].sort((a, b) => (b.confidence - a.confidence) || (gapOf(b) - gapOf(a))).slice(0, 5);
   const tris = [...races].filter((r) => r.trifecta.type !== 'N/A')
     .sort((a, b) => (b.trifecta.hit - a.trifecta.hit)).slice(0, 5);
+  const exs = [...races].filter((r) => !['N/A', 'PASS'].includes(r.exacta.type))
+    .sort((a, b) => (b.exacta.hit / Math.sqrt(b.exacta.combos)) - (a.exacta.hit / Math.sqrt(a.exacta.combos))).slice(0, 5);
+  const sups = [...races].filter((r) => !['N/A', 'PASS'].includes(r.superfecta.type))
+    .sort((a, b) => b.superfecta.hit - a.superfecta.hit).slice(0, 5);
   const good = races.flatMap((r) => r.value.good.map((p) => ({ r, h: horseOf(r, p) }))).sort((a, b) => b.h.value_ratio - a.h.value_ratio);
   const bad = races.flatMap((r) => r.value.bad.map((p) => ({ r, h: horseOf(r, p) }))).sort((a, b) => b.h.value_ratio - a.h.value_ratio);
   const longs = races.flatMap((r) => r.longshots.map((l) => ({ r, l }))).sort((a, b) => (b.l.overlay * Math.sqrt(b.l.hit)) - (a.l.overlay * Math.sqrt(a.l.hit))).slice(0, 8);
@@ -855,7 +921,7 @@ function cardHighlights() {
     ls: longs.reduce((a, x) => a + x.l.cost, 0),
     picks: plans.filter((x) => x.t.verdict === 'PLAY').reduce((a, x) => a + x.t.cost, 0),
   };
-  return { best, tris, good, bad, longs, plans, spend };
+  return { best, tris, exs, sups, good, bad, longs, plans, spend };
 }
 
 function buildPrint() {
@@ -865,7 +931,7 @@ function buildPrint() {
   const play = (t) => (t.type === 'PASS' || t.type === 'N/A' ? `<span class="faint">${t.type === 'PASS' ? 'pass' : 'n/a'}</span>` : `${esc(tc(t.type))} ${esc(t.text)}`);
   const vlist = (r, k) => r.value[k].map((p) => { const h = horseOf(r, p); return `#${p} ${esc(h.ml.replace('/', '-'))}→${esc(h.line)}`; }).join(', ') || '<span class="faint">—</span>';
   const head = (sub) => `<h1>${esc(c.track)} <span class="muted" style="font-size:11pt">${esc(c.date)} · ${sub}</span></h1>
-    <p class="muted" style="margin:2px 0 6px">${esc(weightsText())}${nScr ? ` · ${nScr} scratch${nScr > 1 ? 'es' : ''} applied` : ''} · Model estimates from the program — check scratches and changes before you bet.</p>`;
+    <p class="muted" style="margin:2px 0 6px">${esc(weightsText(effMult()))}${S.st.cond === 'off' ? ' · track set to OFF' : ''}${nScr ? ` · ${nScr} scratch${nScr > 1 ? 'es' : ''} applied` : ''} · Model estimates from the program — check scratches and changes before you bet.</p>`;
   const page1 = `<section class="pp cover">${head('Card summary (1 of 2)')}
     <table><thead><tr><th>Race</th><th>Post</th><th>Win / Under</th><th>Projected top 5</th><th>Trifecta</th><th>Exacta · Super</th><th>Good value (ML→line)</th><th>Bad value (ML→line)</th></tr></thead><tbody>
     ${c.races.map((r) => { const rk = r.ranked;
@@ -881,6 +947,8 @@ function buildPrint() {
     <div class="s2">
       <div class="s2box"><h2>Best bets</h2><ol>${H.best.map((r) => li(`<b>R${r.number} #${r.ranked[0].pgm} ${esc(tc(r.ranked[0].name))}</b> <span class="muted">ML ${esc(r.ranked[0].ml)} · line ${esc(r.ranked[0].line)} · ${r.confidence}/5</span><br><span class="small">${esc((r.ranked[0].pros[0] || ['best overall profile'])[0])}</span>`)).join('')}</ol></div>
       <div class="s2box"><h2>Best trifectas</h2><ol>${H.tris.map((r) => li(`<b>R${r.number} ${esc(tc(r.trifecta.type))} ${esc(r.trifecta.text)}</b> <span class="muted">${dollars(r.trifecta.cost)} · model hit ~${Math.round(r.trifecta.hit * 100)}%</span>`)).join('')}</ol></div>
+      <div class="s2box"><h2>Best exactas</h2><ol>${H.exs.map((r) => li(`<b>R${r.number} ${esc(tc(r.exacta.type))} ${esc(r.exacta.text)}</b> <span class="muted">${dollars(r.exacta.cost)} · model hit ~${Math.round(r.exacta.hit * 100)}%</span>`)).join('')}</ol></div>
+      <div class="s2box"><h2>Superfectas</h2>${H.sups.length ? `<ol>${H.sups.map((r) => li(`<b>R${r.number} ${esc(tc(r.superfecta.type))} ${esc(r.superfecta.text)}</b> <span class="muted">${dollars(r.superfecta.cost)} · ~${Math.round(r.superfecta.hit * 100)}%</span>`)).join('')}</ol>` : '<p class="muted">No superfecta plays on this card.</p>'}</div>
       <div class="s2box"><h2>Good value <span class="muted">(ML → our line)</span></h2>${H.good.length ? `<ol>${H.good.slice(0, 8).map(({ r, h }) => li(`<b class="gv">R${r.number} #${h.pgm} ${esc(tc(h.name))}</b> ML ${esc(h.ml.replace('/', '-'))} → line <b>${esc(h.line)}</b> <span class="muted">· ranked ${ord(h.rank)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
       <div class="s2box"><h2>Bad value — bet against <span class="muted">(ML → our line)</span></h2>${H.bad.length ? `<ol>${H.bad.slice(0, 8).map(({ r, h }) => li(`<b class="bv">R${r.number} #${h.pgm} ${esc(tc(h.name))}</b> ML ${esc(h.ml.replace('/', '-'))} → line <b>${esc(h.line)}</b> <span class="muted">· ranked ${ord(h.rank)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
       <div class="s2box"><h2>Longshot trifectas <span class="muted">(top ${H.longs.length})</span></h2>${H.longs.length ? `<ol>${H.longs.map(({ r, l }) => li(`<b>R${r.number} ${esc(l.text)}</b> <span class="muted">${dollars(l.cost)} · ${esc(l.label)} · model ${pctP(l.hit, 1)} vs ML ${pctP(l.market, l.market < 0.01 ? 2 : 1)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
@@ -1053,9 +1121,34 @@ function renderRecent() {
 
 // ---------------- events ----------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket]');
+  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn]');
   if (!t) return;
   const act = t.dataset.act;
+  if (t.dataset.cond) {
+    S.st.cond = t.dataset.cond; saveState(); rescoreAll(); render(); return;
+  }
+  if (t.dataset.learn) {
+    const track = t.dataset.learn;
+    t.disabled = true; t.textContent = 'Learning…';
+    setTimeout(() => {
+      const r = runSuggestion(track);
+      const profs = LS.get(PROFILE_KEY, {});
+      if (r.final) profs[track] = { mult: Object.fromEntries(Object.entries(r.final).filter(([, v]) => v !== 1)), n: r.n, hits: r.hitsSug, base: r.hitsNorm, made: Date.now() };
+      LS.set(PROFILE_KEY, profs);
+      if (S.key) rescoreAll();
+      render();
+      const out = $('#learnOut');
+      if (out && r.final) out.innerHTML = `${esc(track)}: tested on races it hadn't seen, the learned weights picked <b>${r.hitsSug}</b> winners of ${r.n} vs <b>${r.hitsNorm}</b> with normal weights.`;
+    }, 30);
+    return;
+  }
+  if (t.dataset.unlearn) {
+    const profs = LS.get(PROFILE_KEY, {}); delete profs[t.dataset.unlearn]; LS.set(PROFILE_KEY, profs);
+    if (S.key) rescoreAll(); render(); return;
+  }
+  if (act === 'toggle-profiles') {
+    S.prefs.useProfiles = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return;
+  }
   if (t.dataset.scr) {
     const n = curRace();
     const pgm = +t.dataset.scr;
