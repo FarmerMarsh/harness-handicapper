@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=7';
+import { fmtTime } from './parse.js?v=8';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -458,8 +458,8 @@ function exactaCall(race) {
   const pg = (i) => rk[i].pgm;
   if (base == null || rk.length < 3) return { type: 'N/A', text: 'not offered', combos: 0, cost: 0, hit: 0, base, legs: null };
   if (race.trifecta.type === 'KEY') return { type: 'KEY', text: `#${pg(0)} over #${pg(1)}, #${pg(2)}`, legs: [[pg(0)], [pg(1), pg(2)]], combos: 2, cost: 2 * base, hit: s.ex_key_1_over_23, base };
-  const t = [pg(0), pg(1), pg(2)];
-  return { type: 'BOX', text: t.map((x) => '#' + x).join('-'), legs: [t, t], combos: 6, cost: 6 * base, hit: s.ex_box3, base };
+  const t = [pg(0), pg(1)];   // Marshall: exacta box is always two horses
+  return { type: 'BOX', text: t.map((x) => '#' + x).join('-'), legs: [t, t], combos: 2, cost: 2 * base, hit: s.ex_box2, base };
 }
 
 function superfectaCall(race) {

@@ -1,9 +1,9 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=7';
+import { parseProgram, fmtTime } from './parse.js?v=8';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
-} from './engine.js?v=7';
+} from './engine.js?v=8';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -309,7 +309,13 @@ function summaryCard() {
   const box = (title, inner) => `<div class="sbox"><h3>${title}</h3>${inner}</div>`;
   const lnk = (n, html) => `<a href="#/race/${n}">${html}</a>`;
   const ol = (items) => (items.length ? `<ol>${items.join('')}</ol>` : '<p class="note">None on this card.</p>');
-  return `<section class="panel summary" aria-label="Card summary"><div class="sum-head"><h2>Summary</h2><span class="note">${esc(weightsText(effMult()))}</span></div><div class="sgrid">
+  const P = H.plan;
+  const planBox = `<div class="sbox plan"><h3>Card plan — ${dollars(P.spent)} of ${dollars(P.budget)}
+      <span class="seg small" role="group" aria-label="Card budget">${[25, 50, 75, 100].map((v) => `<button data-cbudget="${v}" class="${P.budget === v ? 'on' : ''}">$${v}</button>`).join('')}</span></h3>
+    <p class="note">${planText(P)}${P.out.length ? ` · left out ${P.out.length} bets (${dollars(P.all - P.spent)}) — playing everything would be ${dollars(P.all)}` : ''}</p>
+    <div class="plangrid">${P.inn.map((x) => `<span>${lnk(x.rn, `<b>${esc(x.label)}</b>`)} ${esc(x.text)} <span class="muted">${dollars(x.cost)}</span></span>`).join('')}</div>
+    ${P.out.length ? `<p class="note faint">Left out: ${P.out.map((x) => `${esc(x.label)} ${dollars(x.cost)}`).join(' · ')}</p>` : ''}</div>`;
+  return `<section class="panel summary" aria-label="Card summary"><div class="sum-head"><h2>Summary</h2><span class="note">${esc(weightsText(effMult()))}</span></div>${planBox}<div class="sgrid">
     ${box('Best bets', ol(H.best.map((r) => { const h = r.ranked[0]; return `<li>${lnk(r.number, `<b>R${r.number} #${h.pgm} ${esc(tc(h.name))}</b>`)} <span class="muted">ML ${esc(h.ml)} · line ${esc(h.line)} · ${r.confidence}/5</span></li>`; })))}
     ${box('Best trifectas', ol(H.tris.map((r) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(tc(r.trifecta.type))} ${esc(r.trifecta.text)}</b>`)} <span class="muted">${dollars(r.trifecta.cost)} · ~${Math.round(r.trifecta.hit * 100)}%</span></li>`)))}
     ${box('Best exactas', ol(H.exs.map((r) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(tc(r.exacta.type))} ${esc(r.exacta.text)}</b>`)} <span class="muted">${dollars(r.exacta.cost)} · ~${Math.round(r.exacta.hit * 100)}%</span></li>`)))}
@@ -831,7 +837,7 @@ function methodHtml() {
   <p><b>Class</b>: average class rating of the last 3 races versus today's, plus a circuit adjustment for shippers (Yonkers, the Meadowlands and Mohawk tougher; Vernon, Tioga, fairs softer).</p>
   <p><b>Added points</b>: lone speed +${ADJ.lone_speed}, closer with a hot pace +${ADJ.closer_setup}, driver upgrade +${ADJ.driver_up}/+${ADJ.driver_up_big}, tough trip that still finished close +${ADJ.tough_trip} each (max +${ADJ.tough_trip_cap}); speed duel ${ADJ.speed_duel}, driver downgrade ${ADJ.driver_down}. Penalties for breaks, layoffs, stale form and thin data.</p>
   <p><b>Winner confidence</b> blends the top pick's points margin with data quality. <b>Undercard</b> rates how often the projected 2nd–5th finish within one spot of projection in 40,000 simulated races.</p>
-  <p><b>Trifecta call</b>: KEY the top pick over the next three when he stands alone (4/5 confidence, 22%+ to win and 1.35× the second choice — or 3/5+, 26%+ and 1.45×); otherwise BOX the top three. Exacta follows the same call; superfecta keys over four when the undercard is 3/5+, boxes four when it's 4/5+, else passes.</p>
+  <p><b>Trifecta call</b>: KEY the top pick over the next three when he stands alone (4/5 confidence, 22%+ to win and 1.35× the second choice — or 3/5+, 26%+ and 1.45×); otherwise BOX the top three. Exacta follows the same call but always uses two horses (key over the next two, or box the top two); superfecta keys over four when the undercard is 3/5+, boxes four when it's 4/5+, else passes.</p>
   <p><b>Value</b>: <span class="gv">good value</span> = the numbers rate a horse at least 2 spots better than the morning line does, at 4/1 or higher. <span class="bv">Bad value</span> = one of the morning line's top 3 choices the numbers rate at least 2 spots worse. <b>Longshot trifectas</b> are built around the good-value horses: the tickets the model gives a real chance that the morning line prices much lower (model % vs ML %).</p>
   <p><b>Multi-race tickets</b> single a horse when he's 5/5 and 35%+ (or clears the style's coverage alone) and otherwise add horses in projected order until the leg covers 45% (tight), 60% (balanced) or 75% (wide) of the model's win chance.</p>
   <p><b>Opening speed</b> combines average position at the first quarter with the estimated opening-quarter time. <b>Season / lifetime mark</b> uses this year's mark, mile-adjusted (the lifetime mark, slightly discounted, if there's none this year).</p>
@@ -921,7 +927,38 @@ function cardHighlights() {
     ls: longs.reduce((a, x) => a + x.l.cost, 0),
     picks: plans.filter((x) => x.t.verdict === 'PLAY').reduce((a, x) => a + x.t.cost, 0),
   };
-  return { best, tris, exs, sups, good, bad, longs, plans, spend };
+  const plan = cardPlan(races, longs, plans);
+  return { best, tris, exs, sups, good, bad, longs, plans, spend, plan };
+}
+
+// $50-per-program plan (Marshall, Nov 5): fill the budget in priority order —
+// Pick plays (already value-checked) → tri + exacta in 4-5 star races → longshot tris →
+// other races' tri + exacta by race strength → superfectas → "go light" races last.
+const cardBudget = () => S.prefs.cardBudget || 50;
+function cardPlan(races, longs, plans) {
+  const items = [];
+  const ok = (t) => t && !['N/A', 'PASS'].includes(t.type) && t.cost > 0;
+  for (const { b, t } of plans) if (t.verdict === 'PLAY') items.push({ id: 'pk:' + b.name + b.races[0], kind: 'Pick', rn: b.races[0], label: `${b.name} R${b.races[0]}–${b.races[b.races.length - 1]}`, text: ticketLine(t), cost: t.cost, tier: 1, sc: t.hit });
+  for (const r of races) {
+    const strong = r.confidence >= 4, light = r.trifecta.caution;
+    const rs = r.confidence + r.undercard / 10 + r.trifecta.hit / 100;   // stronger races first; tri and exacta go in together
+    if (ok(r.trifecta)) items.push({ id: 'tri:' + r.number, kind: 'Tri', rn: r.number, label: `R${r.number} Tri ${tc(r.trifecta.type)}`, text: r.trifecta.text, cost: r.trifecta.cost, tier: light ? 6 : strong ? 2 : 4, sc: rs + 0.001 });
+    if (ok(r.exacta)) items.push({ id: 'ex:' + r.number, kind: 'Ex', rn: r.number, label: `R${r.number} Ex ${tc(r.exacta.type)}`, text: r.exacta.text, cost: r.exacta.cost, tier: light ? 6 : strong ? 2 : 4, sc: rs });
+    if (ok(r.superfecta)) items.push({ id: 'sup:' + r.number, kind: 'Super', rn: r.number, label: `R${r.number} Super ${tc(r.superfecta.type)}`, text: r.superfecta.text, cost: r.superfecta.cost, tier: 5, sc: r.superfecta.hit / r.superfecta.cost });
+  }
+  longs.forEach(({ r, l }, i) => items.push({ id: `ls:${r.number}:${i}`, kind: 'Longshot', rn: r.number, label: `R${r.number} Longshot tri`, text: l.text, cost: l.cost, tier: 3, sc: l.overlay * Math.sqrt(l.hit) }));
+  items.sort((a, b) => (a.tier - b.tier) || (b.sc - a.sc));
+  const budget = cardBudget(); let spent = 0;
+  const inn = [], out = [];
+  for (const it of items) { if (spent + it.cost <= budget + 1e-9) { inn.push(it); spent += it.cost; } else out.push(it); }
+  const byRace = (a, b) => (a.rn - b.rn) || a.kind.localeCompare(b.kind);
+  const sum = (k) => inn.filter((x) => x.kind === k).reduce((a, x) => a + x.cost, 0);
+  return { budget, spent, all: items.reduce((a, x) => a + x.cost, 0), inn: inn.sort(byRace), out: out.sort(byRace), ids: new Set(inn.map((x) => x.id)),
+    parts: { Tri: sum('Tri'), Ex: sum('Ex'), Super: sum('Super'), Longshot: sum('Longshot'), Pick: sum('Pick') } };
+}
+function planText(P) {
+  const nm = { Tri: 'trifectas', Ex: 'exactas', Super: 'superfectas', Longshot: 'longshot tris', Pick: 'Pick plays' };
+  return Object.entries(P.parts).filter(([, v]) => v > 0).map(([k, v]) => `${nm[k]} ${dollars(v)}`).join(' · ');
 }
 
 function buildPrint() {
@@ -930,6 +967,7 @@ function buildPrint() {
   const nScr = Object.values(S.st.scratches).reduce((a, b) => a + b.length, 0);
   const play = (t) => (t.type === 'PASS' || t.type === 'N/A' ? `<span class="faint">${t.type === 'PASS' ? 'pass' : 'n/a'}</span>` : `${esc(tc(t.type))} ${esc(t.text)}`);
   const vlist = (r, k) => r.value[k].map((p) => { const h = horseOf(r, p); return `#${p} ${esc(h.ml.replace('/', '-'))}→${esc(h.line)}`; }).join(', ') || '<span class="faint">—</span>';
+  const mk = (id) => (H.plan.ids.has(id) ? '<span class="gv">✓</span> ' : '');
   const head = (sub) => `<h1>${esc(c.track)} <span class="muted" style="font-size:11pt">${esc(c.date)} · ${sub}</span></h1>
     <p class="muted" style="margin:2px 0 6px">${esc(weightsText(effMult()))}${S.st.cond === 'off' ? ' · track set to OFF' : ''}${nScr ? ` · ${nScr} scratch${nScr > 1 ? 'es' : ''} applied` : ''} · Model estimates from the program — check scratches and changes before you bet.</p>`;
   const page1 = `<section class="pp cover">${head('Card summary (1 of 2)')}
@@ -938,7 +976,7 @@ function buildPrint() {
       return `<tr class="${r.confidence >= 5 ? 'hi' : ''}"><td><b style="font-size:11pt">${r.number}</b></td><td>${esc(r.post_time)}<br><span class="muted">${esc(tc(r.gait))}</span></td>
       <td><span class="stars">${stars(r.confidence)}</span> ${r.confidence}/5<br><span class="stars u">${stars(r.undercard)}</span> ${r.undercard}/5</td>
       <td><b>#${rk[0].pgm} ${esc(tc(rk[0].name))}</b> <span class="muted">(${esc(rk[0].ml)})</span><br>${rk.slice(1, 5).map((h) => `#${h.pgm}`).join(' · ')}</td>
-      <td><b>${play(r.trifecta)}</b></td><td>${play(r.exacta)}<br>${play(r.superfecta)}</td>
+      <td><b>${mk('tri:' + r.number)}${play(r.trifecta)}</b></td><td>${mk('ex:' + r.number)}${play(r.exacta)}<br>${mk('sup:' + r.number)}${play(r.superfecta)}</td>
       <td class="gv">${vlist(r, 'good')}</td><td class="bv">${vlist(r, 'bad')}</td></tr>`; }).join('')}
     </tbody></table></section>`;
   const sp = H.spend;
@@ -954,7 +992,7 @@ function buildPrint() {
       <div class="s2box"><h2>Longshot trifectas <span class="muted">(top ${H.longs.length})</span></h2>${H.longs.length ? `<ol>${H.longs.map(({ r, l }) => li(`<b>R${r.number} ${esc(l.text)}</b> <span class="muted">${dollars(l.cost)} · ${esc(l.label)} · model ${pctP(l.hit, 1)} vs ML ${pctP(l.market, l.market < 0.01 ? 2 : 1)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
       <div class="s2box"><h2>Pick 3 / 4 / 5 &amp; doubles</h2>${H.plans.length ? `<ul class="plain">${H.plans.map(({ b, t, alt }) => li(`${t.verdict === 'PLAY' ? '<b class="gv">PLAY</b>' : '<span class="muted">PASS</span>'} <b>${esc(b.name)} R${b.races[0]}–${b.races[b.races.length - 1]}</b> ${t.verdict === 'PLAY' ? `${ticketLine(t)} = <b>${dollars(t.cost)}</b> <span class="muted">(~${pctP(t.hit, 1)})</span>` : `<span class="muted">— ${esc(t.why)}</span>`}${alt ? `<br><span class="small">At $10: ${ticketLine(alt)} = ${dollars(alt.cost)} (~${pctP(alt.hit, 1)})</span>` : ''}`)).join('')}</ul>` : '<p class="muted">No multi-race wagers on this card.</p>'}</div>
     </div>
-    <div class="spend"><b>If you play everything:</b> trifectas ${dollars(sp.tri)} · exactas ${dollars(sp.ex)} · superfectas ${dollars(sp.sup)} · longshot tris above ${dollars(sp.ls)} · Pick plays ${dollars(sp.picks)} · <b>total ${dollars(sp.tri + sp.ex + sp.sup + sp.ls + sp.picks)}</b></div>
+    <div class="spend"><b>Card plan ${dollars(H.plan.spent)} of ${dollars(H.plan.budget)}:</b> ${planText(H.plan)} <span class="muted">(✓ on page 1)</span>${H.plan.inn.some((x) => x.kind === 'Longshot') ? `<br><span class="small">Longshots in the plan: ${H.plan.inn.filter((x) => x.kind === 'Longshot').map((x) => `${esc(x.label.replace(' Longshot tri', ''))} ${esc(x.text)}`).join(' · ')}</span>` : ''}${H.plan.out.length ? `<br><span class="small muted">Left out to stay on budget: ${H.plan.out.map((x) => `${esc(x.label)} ${dollars(x.cost)}`).join(' · ')} — playing everything would be ${dollars(H.plan.all)}.</span>` : ''}</div>
   </section>`;
   const races = c.races.map((r) => {
     const scrSet = new Set(S.st.scratches[r.number] || []);
@@ -1121,9 +1159,10 @@ function renderRecent() {
 
 // ---------------- events ----------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn]');
+  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn],[data-cbudget]');
   if (!t) return;
   const act = t.dataset.act;
+  if (t.dataset.cbudget) { S.prefs.cardBudget = +t.dataset.cbudget; LS.set(PREF_KEY, S.prefs); render(); return; }
   if (t.dataset.cond) {
     S.st.cond = t.dataset.cond; saveState(); rescoreAll(); render(); return;
   }
