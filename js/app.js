@@ -1,9 +1,9 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=9';
+import { parseProgram, fmtTime } from './parse.js?v=10';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
-} from './engine.js?v=9';
+} from './engine.js?v=10';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -154,10 +154,39 @@ function rescoreAll() {
   S.bets = multiRaceBets(S.card).filter((b) => b.races.every((n) => raceOf(n)));
 }
 const PROFILE_KEY = 'hh:profiles';   // { trackName: { mult, n, hits, made } }
+// A track's profile is used when you switch profiles on, or automatically once the track has
+// 100+ graded races AND the learned weights picked more winners than normal weights on races they hadn't seen.
+const AUTO_PROFILE = 100;
 function activeProfile() {
-  if (!S.card || !S.prefs.useProfiles) return null;
+  if (!S.card) return null;
   const p = LS.get(PROFILE_KEY, {})[S.card.track];
-  return p && p.mult ? p : null;
+  if (!p || !p.mult) return null;
+  if (S.prefs.useProfiles) return p;
+  return p.n >= AUTO_PROFILE && p.better ? p : null;
+}
+function gradedCount(track) {
+  let n = 0;
+  for (const [key, st] of allStates()) {
+    if (key.split('|')[0] !== track) continue;
+    for (const [rn, fin] of Object.entries(st.results || {})) if ((fin || []).some(Boolean) && st.snaps && st.snaps[rn] && st.snaps[rn].feat) n++;
+  }
+  return n;
+}
+function learnTrack(track) {
+  const r = runSuggestion(track);
+  const profs = LS.get(PROFILE_KEY, {});
+  if (r.final) {
+    const better = r.hitsSug >= r.hitsNorm + Math.max(3, Math.round(r.n * 0.05));
+    profs[track] = { mult: Object.fromEntries(Object.entries(r.final).filter(([, v]) => v !== 1)), n: r.n, hits: r.hitsSug, base: r.hitsNorm, better, made: Date.now() };
+    LS.set(PROFILE_KEY, profs);
+  }
+  return r;
+}
+// after results are entered: re-learn a track with 100+ races every 10 new races
+function autoLearn(track) {
+  const n = gradedCount(track), p = LS.get(PROFILE_KEY, {})[track];
+  if (n < AUTO_PROFILE || (p && n < p.n + 10)) return;
+  setTimeout(() => { learnTrack(track); if (S.key) rescoreAll(); render(); }, 60);
 }
 function effMult() { const p = activeProfile(); return p ? { ...DEFAULT_MULT, ...p.mult } : S.mult; }
 function scoreOne(r) {
@@ -793,12 +822,13 @@ function profilesHtml() {
     const n = counts[t] || 0, p = profs[t];
     const diff = p ? customList({ ...DEFAULT_MULT, ...p.mult }) : [];
     return `<tr><td><b>${esc(t)}</b></td><td>${n} graded</td>
-      <td>${p ? (diff.length ? diff.map(([l, x]) => `<span class="pill ${x > 1 ? 'value' : 'badv'}">${esc(l)} ${multText(x)}</span>`).join(' ') : 'normal weights') : '<span class="muted">—</span>'}</td>
+      <td>${p ? (diff.length ? diff.map(([l, x]) => `<span class="pill ${x > 1 ? 'value' : 'badv'}">${esc(l)} ${multText(x)}</span>`).join(' ') : 'normal weights') : '<span class="muted">—</span>'}${p ? ` <span class="note">· ${p.hits} vs ${p.base} winners · ${p.better ? (p.n >= AUTO_PROFILE ? '<b class="gv">auto-on</b>' : `beats normal — auto-on at ${AUTO_PROFILE}`) : 'not better than normal yet'}</span>` : ''}</td>
       <td>${n >= MIN_RACES ? `<button class="btn small" data-learn="${esc(t)}">${p ? 'Re-learn' : 'Learn this track'}</button>` : `<span class="note">needs ${MIN_RACES - n} more</span>`}${p ? ` <button class="btn small" data-unlearn="${esc(t)}">Clear</button>` : ''}</td></tr>`;
   }).join('');
   return `<div class="panel"><h3>Track profiles</h3>
     <p class="note">Each track gets its own learned weights from the races you've graded there (${MIN_RACES}+ races to start, 100+ to trust). When on, a card from that track uses its profile instead of your general weights.</p>
-    <label class="row note"><input type="checkbox" data-act="toggle-profiles" ${S.prefs.useProfiles ? 'checked' : ''}> Use track profiles automatically</label>
+    <p class="note">A profile switches on by itself once its track has ${AUTO_PROFILE}+ graded races and it beats normal weights on races it hadn't seen (re-learned every 10 new races).</p>
+    <label class="row note"><input type="checkbox" data-act="toggle-profiles" ${S.prefs.useProfiles ? 'checked' : ''}> Use every learned profile now, even under ${AUTO_PROFILE} races</label>
     <table class="rec"><thead><tr><th>Track</th><th>Results</th><th>Profile</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">No graded races yet.</td></tr>'}</tbody></table>
     <p class="note" id="learnOut"></p></div>`;
 }
@@ -838,8 +868,8 @@ function methodHtml() {
   <p><b>Class</b>: average class rating of the last 3 races versus today's, plus a circuit adjustment for shippers (Yonkers, the Meadowlands and Mohawk tougher; Vernon, Tioga, fairs softer).</p>
   <p><b>Added points</b>: lone speed +${ADJ.lone_speed}, closer with a hot pace +${ADJ.closer_setup}, driver upgrade +${ADJ.driver_up}/+${ADJ.driver_up_big}, tough trip that still finished close +${ADJ.tough_trip} each (max +${ADJ.tough_trip_cap}); speed duel ${ADJ.speed_duel}, driver downgrade ${ADJ.driver_down}. Penalties for breaks, layoffs, stale form and thin data.</p>
   <p><b>Winner confidence</b> blends the top pick's points margin with data quality. <b>Undercard</b> rates how often the projected 2nd–5th finish within one spot of projection in 40,000 simulated races.</p>
-  <p><b>Trifecta call</b>: KEY the top pick over the next three when he stands alone (4/5 confidence, 22%+ to win and 1.35× the second choice — or 3/5+, 26%+ and 1.45×); otherwise BOX the top three. Exacta follows the same call but always uses two horses (key over the next two, or box the top two); superfecta keys over four when the undercard is 3/5+, boxes four when it's 4/5+, else passes.</p>
-  <p><b>Value</b>: <span class="gv">good value</span> = the numbers rate a horse at least 2 spots better than the morning line does, at 4/1 or higher. <span class="bv">Bad value</span> = one of the morning line's top 3 choices the numbers rate at least 2 spots worse. <b>Longshot trifectas</b> are built around the good-value horses: the tickets the model gives a real chance that the morning line prices much lower (model % vs ML %).</p>
+  <p><b>Trifecta call</b>: KEY the top pick over the next three when he stands alone (4/5 confidence, 22%+ to win and 1.35× the second choice — or 3/5+, 26%+ and 1.45×); otherwise BOX the top three. Exacta follows the same call but always uses two horses (key over the next two, or box the top two); superfecta is only played when the trifecta is a KEY and the undercard is 3/5+ — the top pick over the next three, 6 combos, so it stays cheap; otherwise pass.</p>
+  <p><b>Value</b> (morning line vs our line): <span class="gv">good value</span> = ML at least 1.75× our line and 2+ points longer (ML 10-1, our line 5-1). <span class="bv">Bad value</span> = our line at least 2× the ML and 2+ points longer, on horses 8-1 or shorter (ML 5-1, our line 10-1). <b>Longshot trifectas</b> are built around the good-value horses: the tickets the model gives a real chance that the morning line prices much lower (model % vs ML %).</p>
   <p><b>Multi-race tickets</b> single a horse when he's 5/5 and 35%+ (or clears the style's coverage alone) and otherwise add horses in projected order until the leg covers 45% (tight), 60% (balanced) or 75% (wide) of the model's win chance.</p>
   <p><b>Opening speed</b> combines average position at the first quarter with the estimated opening-quarter time. <b>Season / lifetime mark</b> uses this year's mark, mile-adjusted (the lifetime mark, slightly discounted, if there's none this year).</p>
   <p><b>Default weights</b>: ${wt}. Your settings multiply these (2× doubles a weight, Off sets it to zero); the race-shape bonuses and penalties scale the same way. <b>Bold</b> pros and cons are the race-deciding ones.</p></div>`;
@@ -1171,10 +1201,7 @@ document.addEventListener('click', (e) => {
     const track = t.dataset.learn;
     t.disabled = true; t.textContent = 'Learning…';
     setTimeout(() => {
-      const r = runSuggestion(track);
-      const profs = LS.get(PROFILE_KEY, {});
-      if (r.final) profs[track] = { mult: Object.fromEntries(Object.entries(r.final).filter(([, v]) => v !== 1)), n: r.n, hits: r.hitsSug, base: r.hitsNorm, made: Date.now() };
-      LS.set(PROFILE_KEY, profs);
+      const r = learnTrack(track);
       if (S.key) rescoreAll();
       render();
       const out = $('#learnOut');
@@ -1262,6 +1289,7 @@ document.addEventListener('click', (e) => {
     let nApplied = 0;
     for (const b of boxes) if (b.checked) { applyResult(+b.dataset.pr, S.pasted.found[+b.dataset.pr].order); nApplied++; }
     saveState(); S.pasted = null; location.hash = '#/record'; render();
+    if (S.card) autoLearn(S.card.track);
     if (nApplied) setTimeout(() => alert(`Applied results for ${nApplied} race${nApplied > 1 ? 's' : ''}.`), 50);
   } else if (act === 'export') {
     const cards = LS.get(CARDS_KEY, {});

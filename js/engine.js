@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=9';
+import { fmtTime } from './parse.js?v=10';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -322,7 +322,7 @@ function simulate(ranked, n = 40000, seed = 7) {
   const k = ranked.length;
   const lam = ranked.map((h) => h.score / TEMP);
   const posCount = Array.from({ length: k }, () => new Array(k).fill(0));
-  const c = { key234: 0, key23: 0, box3: 0, box4: 0, straight: 0, exKey: 0, exBox3: 0, exBox2: 0, sfKey: 0, sfBox4: 0 };
+  const c = { key234: 0, key23: 0, box3: 0, box4: 0, straight: 0, exKey: 0, exBox3: 0, exBox2: 0, sfKey: 0, sfBox4: 0, sfKey3: 0 };
   const near = new Array(k).fill(0);
   const tri = new Uint32Array(4096);   // exact 1-2-3 orders, index a*256+b*16+c (ranked indices)
   const g = new Float64Array(k);
@@ -353,6 +353,7 @@ function simulate(ranked, n = 40000, seed = 7) {
       const in1to4 = (x) => x >= 1 && x <= 4;
       if (o1 === 0 && in1to4(o2) && in1to4(o3) && in1to4(o4)) c.sfKey++;
       if (o1 < 4 && o2 < 4 && o3 < 4 && o4 < 4) c.sfBox4++;
+      if (o1 === 0 && in123(o2) && in123(o3) && in123(o4)) c.sfKey3++;
     }
   }
   const res = { n };
@@ -362,7 +363,7 @@ function simulate(ranked, n = 40000, seed = 7) {
   res.key_1_over_234 = c.key234 / n; res.key_1_over_23 = c.key23 / n;
   res.box3 = c.box3 / n; res.box4 = c.box4 / n; res.straight = c.straight / n;
   res.ex_key_1_over_23 = c.exKey / n; res.ex_box3 = c.exBox3 / n; res.ex_box2 = c.exBox2 / n;
-  res.sf_key_1_over_2345 = k >= 5 ? c.sfKey / n : 0; res.sf_box4 = k >= 5 ? c.sfBox4 / n : 0;
+  res.sf_key_1_over_2345 = k >= 5 ? c.sfKey / n : 0; res.sf_box4 = k >= 5 ? c.sfBox4 / n : 0; res.sf_key_1_over_234 = k >= 5 ? (c.sfKey3 || 0) / n : 0;
   const nr = [];
   for (let i = 1; i < Math.min(5, k); i++) nr.push(near[i] / n);
   res.undercard_near = nr.length ? nr.reduce((a, b) => a + b, 0) / nr.length : 0;
@@ -468,15 +469,13 @@ function superfectaCall(race) {
   const rk = race.ranked, s = race.sim, base = wagerBase(race, 'SUPERFECTA');
   const pg = (i) => rk[i].pgm;
   if (base == null || rk.length < 5) return { type: 'N/A', text: 'not offered', combos: 0, cost: 0, hit: 0, base, legs: null };
+  // Marshall (Nov 6): superfecta only when we're strong enough to key, and keep it cheap —
+  // top pick over the next three (6 combos), never a 24-combo box.
   if (race.trifecta.type === 'KEY' && race.undercard >= 3) {
-    const u = [pg(1), pg(2), pg(3), pg(4)];
-    return { type: 'KEY', text: `#${pg(0)} over ${u.map((x) => '#' + x).join(', ')}`, legs: [[pg(0)], u, u, u], combos: 24, cost: 24 * base, hit: s.sf_key_1_over_2345, base };
+    const u = [pg(1), pg(2), pg(3)];
+    return { type: 'KEY', text: `#${pg(0)} over ${u.map((x) => '#' + x).join(', ')}`, legs: [[pg(0)], u, u, u], combos: 6, cost: 6 * base, hit: s.sf_key_1_over_234, base };
   }
-  if (race.undercard >= 4) {
-    const t = [pg(0), pg(1), pg(2), pg(3)];
-    return { type: 'BOX', text: t.map((x) => '#' + x).join('-'), legs: [t, t, t, t], combos: 24, cost: 24 * base, hit: s.sf_box4, base };
-  }
-  return { type: 'PASS', text: 'pass', combos: 0, cost: 0, hit: s.sf_box4, base, legs: null, why: 'undercard too loose to cover 4 deep' };
+  return { type: 'PASS', text: 'pass', combos: 0, cost: 0, hit: s.sf_key_1_over_234, base, legs: null, why: race.trifecta.type === 'KEY' ? 'undercard too loose for a cheap key' : 'only played when the trifecta is a key' };
 }
 
 // Morning-line probabilities, normalized so they add to 100% across the starters.
@@ -515,8 +514,8 @@ function valueCall(race) {
   // good: ML at least 1.75× our line and 2+ points longer (e.g. ML 10-1, our line 5-1)
   const good = rk.filter((h) => has(h) && h.ml_dec >= 1.75 * h.line_dec && h.ml_dec - h.line_dec >= 2)
     .map((h) => ((h.value_ratio = h.ml_dec / h.line_dec), h)).sort((a, b) => b.value_ratio - a.value_ratio).slice(0, 3);
-  // bad: our line at least 1.75× the ML and 2+ points longer, on horses 8-1 or shorter (e.g. ML 5-1, our line 10-1)
-  const bad = rk.filter((h) => has(h) && h.ml_dec <= 8 && h.line_dec >= 1.75 * h.ml_dec && h.line_dec - h.ml_dec >= 2)
+  // bad: our line at least 2× the ML and 2+ points longer, on horses 8-1 or shorter (e.g. ML 5-1, our line 10-1) — 2× since Nov 6
+  const bad = rk.filter((h) => has(h) && h.ml_dec <= 8 && h.line_dec >= 2 * h.ml_dec && h.line_dec - h.ml_dec >= 2)
     .map((h) => ((h.value_ratio = h.line_dec / h.ml_dec), h)).sort((a, b) => b.value_ratio - a.value_ratio).slice(0, 2);
   for (const h of good) h.value = 'good';
   for (const h of bad) h.value = 'bad';
