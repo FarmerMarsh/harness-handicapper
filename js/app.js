@@ -1,19 +1,72 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=11';
+import { parseProgram, fmtTime } from './parse.js?v=12';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=11';
+} from './engine.js?v=12';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
 // ---------------- storage ----------------
+// Everything lives in IndexedDB (hundreds of MB available) with an in-memory copy so reads stay instant.
+// Falls back to localStorage if IndexedDB is blocked. In the desktop app this folder sits next to the .exe.
+const MEM = new Map();
+let IDB = null;
+const clone = (v) => (v == null || typeof v !== 'object' ? v : structuredClone(v));
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('harness-handicapper', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+}
+function idbAll(db) {
+  return new Promise((res, rej) => {
+    const out = new Map(), rq = db.transaction('kv').objectStore('kv').openCursor();
+    rq.onsuccess = () => { const c = rq.result; if (c) { out.set(c.key, c.value); c.continue(); } else res(out); };
+    rq.onerror = () => rej(rq.error);
+  });
+}
+function idbWrite(k, v) {
+  if (!IDB) { try { if (v === undefined) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch { /* full */ } return; }
+  try { const st = IDB.transaction('kv', 'readwrite').objectStore('kv'); if (v === undefined) st.delete(k); else st.put(v, k); } catch (e) { console.error(e); }
+}
+async function storageInit() {
+  try {
+    IDB = await idbOpen();
+    for (const [k, v] of await idbAll(IDB)) MEM.set(k, v);
+    if (!MEM.has('hh:migrated')) {   // one-time move from the old localStorage
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('hh:') && !MEM.has(k)) { try { const v = JSON.parse(localStorage.getItem(k)); MEM.set(k, v); idbWrite(k, v); } catch { /* skip */ } }
+      }
+      MEM.set('hh:migrated', 1); idbWrite('hh:migrated', 1);
+    }
+  } catch {
+    IDB = null;
+    try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith('hh:')) MEM.set(k, JSON.parse(localStorage.getItem(k))); } } catch { /* blocked */ }
+  }
+  migrateCards();
+}
 const LS = {
-  get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } },
+  get(k, d) { return MEM.has(k) ? clone(MEM.get(k)) : d; },
+  set(k, v) { const c = clone(v); MEM.set(k, c); idbWrite(k, c); return true; },
+  del(k) { MEM.delete(k); idbWrite(k, undefined); },
+  keys(prefix) { return [...MEM.keys()].filter((k) => k.startsWith(prefix)); },
 };
-const CARDS_KEY = 'hh:cards';            // { key: { track, date, savedAt, card } }
+const CARDS_KEY = 'hh:cards';            // { key: { track, date, iso, savedAt, races } } — program bodies at hh:card:<key>
+const CARD_PREFIX = 'hh:card:';
+// old format kept the whole program inside hh:cards
+function migrateCards() {
+  const cards = LS.get(CARDS_KEY, {});
+  let changed = false;
+  for (const [k, v] of Object.entries(cards)) {
+    if (v && v.card) { LS.set(CARD_PREFIX + k, v.card); cards[k] = { track: v.track, date: v.date, iso: cardDate(v.card), savedAt: v.savedAt, races: v.card.races.length }; changed = true; }
+  }
+  if (changed) LS.set(CARDS_KEY, cards);
+}
+const getCard = (k) => LS.get(CARD_PREFIX + k, null);
 const STATE_PREFIX = 'hh:state:';
 const stateKey = (k) => STATE_PREFIX + k;   // { scratches, notes, results, snaps, picks }
 const MULT_KEY = 'hh:mult';
@@ -22,7 +75,7 @@ const PREF_KEY = 'hh:prefs';
 const S = {
   key: null, base: null, card: null, st: null,
   mult: { ...DEFAULT_MULT, ...LS.get(MULT_KEY, {}) },
-  tuneOpen: false, dirty: false, shared: null, pasted: null, suggestion: null,
+  tuneOpen: false, dirty: false, shared: null, pasted: null, suggestion: null, lastRoute: {},
   prefs: { sort: 'pgm', view: 'auto', pickBudget: 5, shareName: '', emailTo: '', ...LS.get(PREF_KEY, {}) },
   driverTable: [], today: null, year: null, bets: [],
 };
@@ -187,36 +240,91 @@ function setStatus(msg, err = false) {
 }
 
 // ---------------- loading ----------------
-async function loadFile(file) {
-  if (!file) return;
-  setStatus('Reading program…');
-  try {
-    const buf = new Uint8Array(await file.arrayBuffer());
-    const doc = await pdfjsLib.getDocument({ data: buf }).promise;
-    setStatus(`Reading ${doc.numPages} pages…`);
-    const card = await parseProgram(doc);
-    if (!card.races.length || !card.races.some((r) => r.horses.length)) {
-      setStatus("Couldn't find race pages in that PDF. It reads the standard USTA program the tracks print (Dayton, Scioto, Northfield…) and Trackmaster programs — try the track's own program PDF.", true);
-      return;
-    }
-    const key = `${card.track || 'Track'}|${card.date || file.name}`;
-    const cards = LS.get(CARDS_KEY, {});
-    cards[key] = { track: card.track, date: card.date, savedAt: Date.now(), card };
-    const keys = Object.keys(cards).sort((a, b) => cards[b].savedAt - cards[a].savedAt);
-    for (const k of keys.slice(8)) delete cards[k];
-    if (!LS.set(CARDS_KEY, cards)) { delete cards[key]; }
-    openCard(key, card);
-    setStatus('');
-    location.hash = '#/';
-    render();
-  } catch (e) {
-    console.error(e);
-    setStatus('Something went wrong reading that file: ' + (e.message || e), true);
+async function parseOne(file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const doc = await pdfjsLib.getDocument({ data: buf }).promise;
+  const card = await parseProgram(doc);
+  if (!card.races.length || !card.races.some((r) => r.horses.length)) return null;
+  return card;
+}
+function saveCard(card, fname) {
+  const key = `${card.track || 'Track'}|${card.date || fname}`;
+  const cards = LS.get(CARDS_KEY, {});
+  cards[key] = { track: card.track, date: card.date, iso: cardDate(card), savedAt: Date.now(), races: card.races.length };
+  LS.set(CARD_PREFIX + key, card);
+  LS.set(CARDS_KEY, cards);
+  return key;
+}
+// programs are only kept a few days — every new program carries each horse's recent lines. Results stay forever.
+function pruneCards() {
+  const keep = S.prefs.keepDays ?? 3;
+  const cards = LS.get(CARDS_KEY, {});
+  const newest = Math.max(...Object.values(cards).map((c) => Date.parse(c.iso || 0) || 0), Date.now() - 864e5 * 0);
+  for (const [k, c] of Object.entries(cards)) {
+    const d = Date.parse(c.iso || 0) || 0;
+    const loaded = c.savedAt || 0;
+    if (d && newest - d > keep * 864e5 && Date.now() - loaded > keep * 864e5 && k !== S.key) { delete cards[k]; LS.del(CARD_PREFIX + k); }
   }
+  LS.set(CARDS_KEY, cards);
+}
+async function loadFiles(files) {
+  files = [...(files || [])].filter((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+  if (!files.length) return;
+  const opened = [], failed = [];
+  for (let i = 0; i < files.length; i++) {
+    setStatus(`Reading ${files.length > 1 ? `program ${i + 1} of ${files.length}` : 'program'}…`);
+    showBusy(`Reading ${files[i].name}${files.length > 1 ? ` (${i + 1} of ${files.length})` : ''}…`);
+    try {
+      const card = await parseOne(files[i]);
+      if (!card) { failed.push(files[i].name); continue; }
+      opened.push(saveCard(card, files[i].name));
+    } catch (e) { console.error(e); failed.push(files[i].name); }
+  }
+  showBusy('');
+  pruneCards();
+  if (failed.length) setStatus(`Couldn't find race pages in ${failed.join(', ')}. It reads the standard USTA program the tracks print (Dayton, Scioto, Northfield…) and Trackmaster programs.`, true);
+  else setStatus('');
+  if (opened.length) { switchTo(opened[0], '#/'); }
+}
+const loadFile = (f) => loadFiles(f ? [f] : []);
+function showBusy(msg) {
+  let el = $('#busy');
+  if (!el) { el = document.createElement('div'); el.id = 'busy'; el.className = 'busy'; document.body.appendChild(el); }
+  el.textContent = msg; el.hidden = !msg;
+}
+// switch programs, coming back to the same page (race 5 → race 5) when it exists
+function switchTo(key, hash) {
+  const card = getCard(key);
+  if (!card) return;
+  if (S.key) S.lastRoute[S.key] = location.hash || '#/';
+  openCard(key, card);
+  const m = (hash || '').match(/race\/(\d+)/);
+  let to = hash ?? S.lastRoute[key] ?? '#/';
+  if (m && !card.races.some((r) => r.number === +m[1])) to = '#/';
+  if (location.hash === to) render(); else location.hash = to;
+}
+// programs for the same day as the open one, by track
+function dayCards() {
+  if (!S.key) return [];
+  const cards = LS.get(CARDS_KEY, {}), mine = cards[S.key];
+  if (!mine) return [[S.key, { track: S.card.track }]];
+  return Object.entries(cards).filter(([, c]) => c.date === mine.date).sort((a, b) => (a[1].savedAt || 0) - (b[1].savedAt || 0));
+}
+function daybarHtml() {
+  if (!S.key) return '';
+  const cards = LS.get(CARDS_KEY, {});
+  const today = dayCards();
+  const others = Object.entries(cards).filter(([k]) => !today.some(([t]) => t === k)).sort((a, b) => (Date.parse(b[1].iso || 0) || 0) - (Date.parse(a[1].iso || 0) || 0));
+  const shortTrack = (t) => (t || '').replace(/\s+(Raceway|Downs|Park|Racetrack|Racing|& Casino|Casino)\b.*$/i, '');
+  return `<div class="daybar-in"><span class="note">${esc((cards[S.key] || {}).date || S.card.date || '')}</span>
+    <div class="dtabs" role="tablist">${today.map(([k, c]) => `<button role="tab" aria-selected="${k === S.key}" class="${k === S.key ? 'on' : ''}" data-switch="${esc(k)}">${esc(shortTrack(c.track))}</button>`).join('')}</div>
+    <label class="btn small add">+ Add program<input type="file" accept="application/pdf,.pdf" multiple data-act="addfiles" hidden></label>
+    ${others.length ? `<select class="other" data-other aria-label="Other saved programs"><option value="">Other days…</option>${others.map(([k, c]) => `<option value="${esc(k)}">${esc(c.track)} · ${esc(c.date)}</option>`).join('')}</select>` : ''}</div>`;
 }
 
 function openCard(key, card) {
   S.key = key;
+  LS.set('hh:open', key);
   S.base = JSON.stringify(card);
   S.st = { scratches: {}, notes: {}, results: {}, snaps: {}, picks: {}, ...LS.get(stateKey(key), {}) };
   S.st.picks = S.st.picks || {};
@@ -382,14 +490,7 @@ function gradedRows(st) {
   return rows.sort((a, b) => a.race - b.race);
 }
 function allStates() {
-  const out = [];
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith(STATE_PREFIX)) out.push([k.slice(STATE_PREFIX.length), LS.get(k, null)]);
-    }
-  } catch { /* storage blocked */ }
-  return out.filter(([, st]) => st);
+  return LS.keys(STATE_PREFIX).map((k) => [k.slice(STATE_PREFIX.length), MEM.get(k)]).filter(([, st]) => st);
 }
 
 // ---------------- best / worst highlights ----------------
@@ -437,7 +538,7 @@ function renderCard() {
   <div class="cardhead">
     <div><h1>${esc(c.track)}</h1><div class="sub">${esc(c.date)} · ${c.races.length} races${nScr ? ` · ${nScr} scratched` : ''} · ${weightsBadge()}</div></div>
     <div class="row"><button class="btn small primary" data-act="email">Email PDF</button><button class="btn small" data-act="pdf">Download PDF</button><button class="btn small" data-act="print">Print</button>
-      ${S.bets.length ? '<a class="btn small" href="#/picks">Pick 3/4/5 tickets</a>' : ''}<a class="btn small" href="#/results">Enter results</a><button class="btn small" data-act="new">Load another program</button></div>
+      ${S.bets.length ? '<a class="btn small" href="#/picks">Pick 3/4/5 tickets</a>' : ''}<a class="btn small" href="#/results">Enter results</a><button class="btn small" data-act="new">+ Add program</button></div>
   </div>
   <div class="condbar"><span class="note">Track today:</span><div class="seg" role="group" aria-label="Track condition">
     <button data-cond="fast" class="${(S.st.cond || 'fast') === 'fast' ? 'on' : ''}">Fast</button><button data-cond="off" class="${S.st.cond === 'off' ? 'on' : ''}">Off (good / sloppy / muddy)</button></div>
@@ -1044,7 +1145,8 @@ function renderSettings() {
   <div class="panel" style="margin-top:12px"><h3>Share your settings</h3>
     <div class="row"><label class="note" for="shareName">Your name (optional, shown to whoever opens the link)</label></div>
     <div class="row"><input id="shareName" class="txt" maxlength="24" value="${esc(S.prefs.shareName)}" placeholder="e.g. Marshall"><button class="btn primary" data-act="share">Copy share link</button></div>
-    <p class="note" id="shareOut">Friends who open the link get asked whether to use your weights. Their own settings stay put unless they say yes.</p></div>
+    <p class="note" id="shareOut">Friends who open the link get asked whether to use your weights. Their own settings stay put unless they say yes.</p>
+    <div class="row"><input id="pasteLink" class="txt" placeholder="Got a link from a friend? Paste it here"><button class="btn" data-act="use-link">Load their weights</button></div></div>
   <div class="panel" style="margin-top:12px"><h3>Email</h3>
     <div class="row"><label class="note" for="emailTo">Send-to address(es) for Email PDF — separate with commas (used when your browser opens an email draft)</label></div>
     <div class="row"><input id="emailTo" class="txt" type="email" multiple value="${esc(S.prefs.emailTo)}" placeholder="you@example.com, friend@example.com"><button class="btn" data-act="save-email">Save</button><span class="note" id="emailSaved"></span></div></div>
@@ -1059,7 +1161,7 @@ function shareUrl() {
   const q = new URLSearchParams();
   q.set('w', w || 'normal');
   if (S.prefs.shareName) q.set('n', S.prefs.shareName);
-  return `${location.origin}${location.pathname}?${q.toString()}`;
+  return `${DESK ? SITE : location.origin + location.pathname}?${q.toString()}`;
 }
 async function shareSettings() {
   const url = shareUrl();
@@ -1073,8 +1175,8 @@ async function shareSettings() {
   if (el) el.innerHTML = `${ok ? 'Copied! ' : ''}<a href="${esc(url)}">${esc(url)}</a>`;
   else alert((ok ? 'Link copied:\n' : 'Share this link:\n') + url);
 }
-function readSharedFromUrl() {
-  const q = new URLSearchParams(location.search);
+function readSharedFromUrl(search = location.search) {
+  const q = new URLSearchParams(search);
   const w = q.get('w');
   if (!w) return;
   const mult = { ...DEFAULT_MULT };
@@ -1252,7 +1354,18 @@ function overlay(title) {
   document.body.appendChild(ov);
   return { el: ov, msg: (m) => { ov.querySelector('.ov-msg').textContent = m; }, html: (h) => { ov.querySelector('.overlay-box').innerHTML = h; }, close: () => ov.remove() };
 }
-function saveBlob(blob, name) {
+// ---------------- desktop app (Windows .exe) ----------------
+const DESK = window.__TAURI__ && window.__TAURI__.core ? window.__TAURI__.core : null;
+const SITE = 'https://farmermarsh.github.io/harness-handicapper/';
+async function deskSave(blob, name, folder = 'pdf') {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return DESK.invoke('save_file', { folder, name, b64: btoa(bin) });
+}
+const deskOpen = (path) => DESK.invoke('open_path', { path }).catch((e) => alert(String(e)));
+function saveBlob(blob, name, folder = 'pdf') {
+  if (DESK) return deskSave(blob, name, folder).then((path) => { S.lastSaved = path; return path; });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
@@ -1262,7 +1375,10 @@ async function downloadPdf() {
   if (!S.key || S._pdfBusy) return;
   S._pdfBusy = true;
   const ov = overlay('Building your PDF…');
-  try { saveBlob(await makePdf(ov.msg), pdfName()); }
+  try {
+    const path = await saveBlob(await makePdf(ov.msg), pdfName());
+    if (DESK && path) deskOpen(path);
+  }
   catch (e) { console.error(e); alert('Could not build the PDF: ' + (e.message || e) + '. You can still use Print → Save as PDF.'); }
   finally { ov.close(); S._pdfBusy = false; }
 }
@@ -1288,7 +1404,16 @@ async function emailPdf() {
   try {
     const blob = await makePdf(ov.msg);
     const file = new File([blob], pdfName(), { type: 'application/pdf' });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    if (DESK) {
+      const path = await saveBlob(blob, pdfName());
+      ov.html(`<b>PDF saved</b><p class="note">Saved to <b>${esc(path)}</b>. Your email opens with the picks typed in — attach the PDF from that folder, then send.</p><button class="btn primary" id="ovMail">Open email</button> <button class="btn" id="ovPdf">Open PDF</button> <button class="btn" id="ovFolder">Open folder</button> <button class="btn" id="ovDone">Done</button>`);
+      await new Promise((resolve) => {
+        $('#ovDone').onclick = resolve;
+        $('#ovPdf').onclick = () => deskOpen(path);
+        $('#ovFolder').onclick = () => DESK.invoke('open_folder', { folder: 'pdf' }).catch((e) => alert(String(e)));
+        $('#ovMail').onclick = () => { openMailDraft(to, subject); resolve(); };
+      });
+    } else if (navigator.canShare && navigator.canShare({ files: [file] })) {
       ov.html(`<b>PDF ready</b><p class="note">Pick <b>Mail</b> (or Outlook / Gmail) in the share menu — the PDF goes in as an attachment.</p><button class="btn primary" id="ovShare">Share / Email</button> <button class="btn" id="ovCancel">Cancel</button>`);
       await new Promise((resolve) => {
         $('#ovCancel').onclick = resolve;
@@ -1314,13 +1439,16 @@ async function emailPdf() {
 function openMailDraft(to, subject) {
   let body = emailBody();
   if (body.length > 1700) body = body.slice(0, 1700) + '\n…';
-  location.href = `mailto:${encodeURIComponent(to).replace(/%2C/gi, ',').replace(/%40/g, '@')}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const url = `mailto:${encodeURIComponent(to).replace(/%2C/gi, ',').replace(/%40/g, '@')}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  if (DESK) DESK.invoke('open_url', { url }).catch((e) => alert(String(e)));
+  else location.href = url;
 }
 
 // ---------------- router ----------------
 function render() {
   const hash = location.hash || '#/';
   const upload = $('#upload'), view = $('#view'), nav = $('#topnav');
+  const bar = $('#daybar'); if (bar) { bar.hidden = !S.key; bar.innerHTML = daybarHtml(); }
   nav.hidden = !S.key;
   for (const a of nav.querySelectorAll('a')) a.classList.remove('on');
   const picksLink = nav.querySelector('[data-nav="picks"]');
@@ -1347,16 +1475,24 @@ function render() {
 
 function renderRecent() {
   const cards = LS.get(CARDS_KEY, {});
-  const keys = Object.keys(cards).filter((k) => cards[k].card && cards[k].card.races && cards[k].card.races.length).sort((a, b) => cards[b].savedAt - cards[a].savedAt);
-  $('#recent').innerHTML = keys.length ? `<div class="note">Recent programs on this device</div>` +
+  const keys = Object.keys(cards).sort((a, b) => (Date.parse(cards[b].iso || 0) || 0) - (Date.parse(cards[a].iso || 0) || 0) || cards[b].savedAt - cards[a].savedAt);
+  $('#recent').innerHTML = keys.length ? `<div class="note">Programs on this device</div>` +
     keys.map((k) => `<button class="btn" data-open="${esc(k)}">${esc(cards[k].track)} · ${esc(cards[k].date)}</button>`).join('') : '';
 }
 
 // ---------------- events ----------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn],[data-cbudget],[data-setplays]');
+  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn],[data-cbudget],[data-setplays],[data-switch]');
   if (!t) return;
   const act = t.dataset.act;
+  if (act === 'use-link') {
+    const v = ($('#pasteLink') || {}).value || '';
+    try { readSharedFromUrl(new URL(v.trim()).search); } catch { alert("That doesn't look like a share link."); return; }
+    if (!S.shared) { alert("That link doesn't have any weights in it."); return; }
+    render(); window.scrollTo(0, 0); return;
+  }
+  if (act === 'open-data') { e.preventDefault(); DESK && DESK.invoke('open_folder', { folder: '' }).catch((x) => alert(String(x))); return; }
+  if (t.dataset.switch) { if (t.dataset.switch !== S.key) switchTo(t.dataset.switch); return; }
   if (t.dataset.setplays) {
     const [name, v] = t.dataset.setplays.split('|'); const books = LS.get(TRACKS_KEY, {}); books[name] = { ...(books[name] || { cards: {} }), plays: v }; LS.set(TRACKS_KEY, books);
     if (S.key) rescoreAll(); render(); return;
@@ -1418,11 +1554,9 @@ document.addEventListener('click', (e) => {
     if (st) delete st.legs;
     saveState(); render();
   } else if (t.dataset.open) {
-    const cards = LS.get(CARDS_KEY, {});
-    const v = cards[t.dataset.open];
-    if (v) { openCard(t.dataset.open, v.card); location.hash = '#/'; render(); }
+    switchTo(t.dataset.open, '#/');
   } else if (act === 'new') {
-    S.key = null; location.hash = '#/'; render(); $('#file').value = ''; $('#file').click();
+    const f = $('[data-act="addfiles"]'); if (f) { f.value = ''; f.click(); } else { $('#file').value = ''; $('#file').click(); }
   } else if (act === 'reset-weights') {
     applyMult({ ...DEFAULT_MULT });
   } else if (t.dataset.preset) {
@@ -1466,15 +1600,16 @@ document.addEventListener('click', (e) => {
     const cards = LS.get(CARDS_KEY, {});
     const out = { exported: new Date().toISOString(), cards: {}, tracks: LS.get(TRACKS_KEY, {}), profiles: LS.get(PROFILE_KEY, {}) };
     for (const [k, st] of allStates()) out.cards[k] = { track: cards[k]?.track || k.split('|')[0], date: cards[k]?.date || k.split('|')[1] || '', state: st };
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' }));
-    a.download = 'harness-record.json'; a.click();
+    const blob = new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' });
+    if (DESK) saveBlob(blob, `harness-record-${new Date().toISOString().slice(0, 10)}.json`, 'export').then((path) => alert('Record saved to ' + path));
+    else { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'harness-record.json'; a.click(); }
   }
 });
 
 document.addEventListener('change', async (e) => {
   const t = e.target;
-  if (t.id === 'file') return loadFile(t.files[0]);
+  if (t.id === 'file' || t.dataset.act === 'addfiles') return loadFiles(t.files);
+  if (t.dataset.other !== undefined && t.value) return switchTo(t.value, '#/');
   if (t.dataset.plays) {
     const books = LS.get(TRACKS_KEY, {}); books[t.dataset.plays] = { ...(books[t.dataset.plays] || { cards: {} }), plays: t.value }; LS.set(TRACKS_KEY, books);
     if (S.key) rescoreAll(); render(); return;
@@ -1527,7 +1662,10 @@ document.addEventListener('input', (e) => {
 const drop = $('#drop');
 ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
-drop.addEventListener('drop', (e) => loadFile(e.dataTransfer.files[0]));
+drop.addEventListener('drop', (e) => loadFiles(e.dataTransfer.files));
+// drop PDFs anywhere once a card is open
+document.addEventListener('dragover', (e) => { if (S.key && [...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
+document.addEventListener('drop', (e) => { if (S.key && e.dataTransfer?.files?.length && !e.target.closest('#drop')) { e.preventDefault(); loadFiles(e.dataTransfer.files); } });
 
 $('#printBtn').addEventListener('click', () => emailPdf());
 window.addEventListener('beforeprint', () => { if (S.key) buildPrint(); });
@@ -1543,10 +1681,20 @@ function applyMult(m) {
 }
 
 // reopen the most recent card on this device
-(function init() {
+(async function init() {
+  await storageInit();
+  if (DESK) {
+    document.body.classList.add('desk');
+    DESK.invoke('data_dir').then((d) => { const v = $('#ver'); if (v) v.insertAdjacentHTML('afterend', ` · Desktop app · data: <a href="#" data-act="open-data">${esc(d)}</a>`); }).catch(() => {});
+  }
+  S.mult = { ...DEFAULT_MULT, ...LS.get(MULT_KEY, {}) };
+  S.prefs = { ...S.prefs, ...LS.get(PREF_KEY, {}) };
   readSharedFromUrl();
+  pruneCards();
   const cards = LS.get(CARDS_KEY, {});
-  const keys = Object.keys(cards).filter((k) => cards[k].card && cards[k].card.races && cards[k].card.races.length).sort((a, b) => cards[b].savedAt - cards[a].savedAt);
-  if (keys.length && (Date.now() - cards[keys[0]].savedAt) < 36 * 3600 * 1000) openCard(keys[0], cards[keys[0]].card);
+  const keys = Object.keys(cards).sort((a, b) => cards[b].savedAt - cards[a].savedAt);
+  const last = LS.get('hh:open', null);
+  const pick = last && cards[last] ? last : keys[0];
+  if (pick && getCard(pick)) openCard(pick, getCard(pick));
   render();
 })();

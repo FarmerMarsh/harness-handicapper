@@ -1,0 +1,46 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [main]
+    paths: ['index.html', 'js/**', 'css/**', 'vendor/**', 'src-tauri/**', '.github/workflows/desktop.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Copy the web app into dist
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item index.html dist/
+          Copy-Item -Recurse js, css, vendor dist/
+      - name: Build portable exe
+        run: npx --yes @tauri-apps/cli@2 build --no-bundle
+      - name: Name it
+        shell: pwsh
+        run: Copy-Item src-tauri/target/release/harness-handicapper.exe HarnessHandicapper.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HarnessHandicapper
+          path: HarnessHandicapper.exe
+      - name: Publish to the Desktop app release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(grep -o 'Version [0-9]*' index.html | head -1)
+          gh release delete desktop --yes --cleanup-tag || true
+          gh release create desktop HarnessHandicapper.exe --title "Harness Handicapper for Windows ($VER)" --latest --notes "Portable Windows app — download HarnessHandicapper.exe and double-click it. No install needed. Your programs, results and PDFs are saved in a 'Harness Handicapper Data' folder next to the .exe, so it can run from a flash drive. First launch: if Windows shows 'Windows protected your PC', click More info → Run anyway. Built from ${GITHUB_SHA::7}."
