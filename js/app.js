@@ -1,9 +1,10 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=10';
+import { parseProgram, fmtTime } from './parse.js?v=11';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
-} from './engine.js?v=10';
+  SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
+} from './engine.js?v=11';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -86,20 +87,97 @@ function weightsBadge() {
   const c = customList();
   return `<a class="pill key" href="#/settings" title="${esc(c.map(([l, x]) => `${l} ${multText(x)}`).join(', '))}">Custom weights: ${esc(c.slice(0, 2).map(([l, x]) => `${l} ${multText(x)}`).join(', '))}${c.length > 2 ? ` +${c.length - 2} more` : ''}</a>`;
 }
+// Six main sliders; each moves a group of factors. Advanced shows every factor.
+const GROUPS = [
+  { id: 'speed', label: 'Speed', keys: ['speed', 'trend', 'sizefit'], help: 'Speed ratings and adjusted mile times (last 4 clean), speed trend, track-size fit' },
+  { id: 'pace', label: 'Pace style', pace: true, help: 'Slide toward closers or toward early speed — on top of what the track size already does' },
+  { id: 'form', label: 'Form', keys: ['form', 'beaten', 'year', 'fresh'], help: 'Last 4 finishes, beaten lengths, this-year record, days since last start' },
+  { id: 'class', label: 'Class', keys: ['class', 'odds'], help: 'Class faced, circuit and purse moves, last-start odds' },
+  { id: 'conn', label: 'Driver / trainer', keys: ['driver', 'trainer', 'hot', 'conn', 'driver_change'], help: 'Driver UDR, trainer win %, hot/cold, team and barn moves, driver changes' },
+  { id: 'post', label: 'Post & trip', keys: ['post', 'tough_trip'], help: 'Post-position win rate at this track, credit for tough trips' },
+];
+const PACE_STEP = 1.4;
+const PACE_UP = ['early', 'pace'], PACE_DN = ['close', 'late'];
+function paceValue(m = S.mult) {
+  const u = PACE_UP.map((k) => m[k] ?? 1), d = PACE_DN.map((k) => m[k] ?? 1);
+  if (u.some((x) => Math.abs(x - u[0]) > 1e-6) || d.some((x) => Math.abs(x - d[0]) > 1e-6) || !(u[0] > 0) || Math.abs(u[0] * d[0] - 1) > 0.02) return null;
+  return Math.round((Math.log(u[0]) / Math.log(PACE_STEP)) * 2) / 2;
+}
+const paceText = (v) => (v == null ? 'Mixed' : v === 0 ? 'Track normal' : v > 0 ? `Speed +${v}` : `Closers +${-v}`);
+function groupValue(g, m = S.mult) {
+  const xs = g.keys.map((k) => m[k] ?? 1);
+  return xs.every((x) => x === xs[0]) ? xs[0] : null;
+}
+function setGroup(id, x) {
+  const g = GROUPS.find((q) => q.id === id);
+  if (g.pace) { const f = PACE_STEP ** x; for (const k of PACE_UP) S.mult[k] = +f.toFixed(3); for (const k of PACE_DN) S.mult[k] = +(1 / f).toFixed(3); }
+  else for (const k of g.keys) S.mult[k] = x;
+}
+function baseHtml() {
+  if (!S.card) return '<p class="note">Load a program to see how Normal adjusts for its track.</p>';
+  const r0 = S.card.races[0] || {};
+  const sz = r0.track_size, on = S.prefs.baseAuto !== false;
+  const fmt = (o) => Object.entries(o || {}).map(([k, v]) => `${k === 'pace' ? 'pace setup' : k === 'tough_trip' ? 'tough trip' : k === 'early' ? 'early speed' : k === 'close' ? 'closing ¼' : k === 'late' ? 'late move' : k} ×${v}`).join(', ');
+  const trots = S.card.races.filter((r) => r.gait === 'TROT').map((r) => r.number);
+  const plays = r0.plays;
+  const parts = [`<b>${esc(SIZE_LABEL[sz] || 'unknown size')}</b>${SIZE_MULT[sz] ? `: ${fmt(SIZE_MULT[sz])}` : ''}`];
+  if (trots.length) parts.push(`<b>trotters</b> (R${trots.join(', R')}): ${fmt(GAIT_MULT.TROT)}`);
+  if (plays) parts.push(`<b>${plays === 'speed' ? 'plays fast' : 'plays fair to closers'}</b>: ${fmt(PLAYS_MULT[plays])}`);
+  if (S.prefs.season !== false && S.today && isCold(S.today)) parts.push(`<b>cold-weather</b>: ${fmt(COLD_MULT)}`);
+  return `<div class="basebox"><div><b>Track normal for ${esc(S.card.track)}</b> <a class="note" href="#/tracks">Track book →</a></div>
+    <p class="note">${on ? parts.join(' · ') : 'Off — every track uses the same Normal.'}</p>
+    <label class="row note"><input type="checkbox" data-act="toggle-base" ${on ? 'checked' : ''}> Normal adjusts for track size, trotters vs pacers and how the track plays</label>
+    <label class="row note"><input type="checkbox" data-act="toggle-season" ${S.prefs.season !== false ? 'checked' : ''}> Cold-weather adjust (Dec–Mar: a little less early speed, a little more closing)</label>
+    <p class="note" id="tuneDiff">${diffText()}</p></div>`;
+}
 function tuneHtml(compact = false) {
   const pk = presetName();
-  const group = (g, title) => `<h3>${title}</h3><div class="weights">${FACTORS.filter((f) => f.group === g).map((f) => {
-    const x = S.mult[f.key] ?? 1;
-    return `<div class="w"><label for="m-${f.key}">${esc(f.label)}</label><output id="mo-${f.key}" class="${x > 1 ? 'up' : x < 1 ? 'down' : ''}">${multText(x)}</output>
-      <input type="range" id="m-${f.key}" min="0" max="3" step="0.25" value="${x}" data-m="${f.key}" aria-describedby="mh-${f.key}">
-      <div class="wh" id="mh-${f.key}">${esc(f.help)}</div></div>`;
-  }).join('')}</div>`;
+  const row = (id, label, help, val, min, max, step, txt, data) => `<div class="w"><label for="m-${id}">${esc(label)}</label><output id="mo-${id}" class="${val == null ? '' : (data === 'g-pace' ? val > 0 : val > 1) ? 'up' : (data === 'g-pace' ? val < 0 : val < 1) ? 'down' : ''}">${txt}</output>
+      <input type="range" id="m-${id}" min="${min}" max="${max}" step="${step}" value="${val ?? (data === 'g-pace' ? 0 : 1)}" ${data.startsWith('g-') ? `data-g="${data.slice(2)}"` : `data-m="${id}"`}>
+      <div class="wh">${esc(help)}</div></div>`;
+  const main = GROUPS.map((g) => {
+    if (g.pace) { const v = paceValue(); return row('g-pace', g.label + ' (closers ← → speed)', g.help, v, -2, 2, 0.5, paceText(v), 'g-pace'); }
+    const v = groupValue(g); return row('g-' + g.id, g.label, g.help, v, 0, 3, 0.25, v == null ? 'Mixed' : multText(v), 'g-' + g.id);
+  }).join('');
+  const group = (g, title) => `<h3>${title}</h3><div class="weights">${FACTORS.filter((f) => f.group === g).map((f) => { const x = S.mult[f.key] ?? 1; return row(f.key, f.label, f.help, x, 0, 3, 0.25, multText(x), f.key); }).join('')}</div>`;
   return `<div class="panel tune">
     <div class="presets"><span class="note">Start from:</span>${Object.entries(PRESETS).map(([k, p]) => `<button class="btn small ${pk === k ? 'primary' : ''}" data-preset="${k}">${esc(p.label)}</button>`).join('')}
       <button class="btn small" data-act="share">Share my settings</button></div>
-    ${group('weight', 'Ranking factors')}${group('adj', 'Race-shape bonuses')}${group('pen', 'Penalties')}
-    <p class="note">Normal = the standard model. 2× counts a factor twice as much, 0.5× half as much, Off ignores it. Your settings stay in this browser${compact ? ' and apply to every race' : ''}.</p>
+    ${baseHtml()}
+    <h3>Main weights</h3><div class="weights">${main}</div>
+    <details class="adv" ${S.advOpen ? 'open' : ''}><summary data-act="adv">Advanced — every factor</summary>
+      ${group('weight', 'Ranking factors')}${group('adj', 'Race-shape bonuses')}${group('pen', 'Penalties')}</details>
+    <p class="note">Normal = the track normal above. 2× counts a factor twice as much, 0.5× half as much, Off ignores it. Your settings multiply on top of the track normal and stay in this browser${compact ? ' and apply to every race' : ''}.</p>
   </div>`;
+}
+// how many top picks your weights change vs the plain track normal
+function normalTops() {
+  const ck = `${S.key}|${S.st.cond || 'fast'}|${JSON.stringify(S.st.scratches)}|${S.prefs.baseAuto !== false}|${S.prefs.season !== false}`;
+  if (S._nt && S._nt.k === ck) return S._nt.v;
+  const raw = JSON.parse(S.base), v = {};
+  for (const r of raw.races) {
+    if (!r.horses.length) continue;
+    scoreRace(r, { ...scoreOpts(r), mult: DEFAULT_MULT, sim: false });
+    v[r.number] = r.ranked.length ? r.ranked[0].pgm : null;
+  }
+  S._nt = { k: ck, v };
+  return v;
+}
+function diffText() {
+  if (!S.card) return '';
+  const nt = normalTops(), races = S.card.races.filter((r) => r.ranked && r.ranked.length);
+  const d = races.filter((r) => nt[r.number] != null && nt[r.number] !== r.ranked[0].pgm);
+  return d.length ? `Your weights change the top pick in <b>${d.length}</b> of ${races.length} races vs the track normal (R${d.map((r) => r.number).join(', R')}).` : `Your weights pick the same winners as the track normal in all ${races.length} races.`;
+}
+function syncTune() {
+  for (const f of FACTORS) { const i = $('#m-' + f.key), o = $('#mo-' + f.key), x = S.mult[f.key] ?? 1; if (i) i.value = x; if (o) { o.textContent = multText(x); o.className = x > 1 ? 'up' : x < 1 ? 'down' : ''; } }
+  for (const g of GROUPS) {
+    const i = $('#m-g-' + g.id), o = $('#mo-g-' + g.id); if (!i) continue;
+    if (g.pace) { const v = paceValue(); i.value = v ?? 0; o.textContent = paceText(v); o.className = v > 0 ? 'up' : v < 0 ? 'down' : ''; }
+    else { const v = groupValue(g); i.value = v ?? 1; o.textContent = v == null ? 'Mixed' : multText(v); o.className = v > 1 ? 'up' : v < 1 && v != null ? 'down' : ''; }
+  }
+  document.querySelectorAll('[data-preset]').forEach((b) => b.classList.toggle('primary', b.dataset.preset === presetName()));
+  const wb = $('#wbadge2'); if (wb) wb.innerHTML = weightsBadge();
 }
 
 function setStatus(msg, err = false) {
@@ -150,7 +228,9 @@ function rescoreAll() {
   S.today = cardDate(S.card);
   S.year = new Date(S.today).getUTCFullYear();
   S.driverTable = cardDriverTable(S.card);
+  S.book = bookFor(S.card.track);
   for (const r of S.card.races) scoreOne(r);
+  if (!S._noted || S._noted !== S.key) { S._noted = S.key; noteTrack(S.card); S.book = bookFor(S.card.track); }
   S.bets = multiRaceBets(S.card).filter((b) => b.races.every((n) => raceOf(n)));
 }
 const PROFILE_KEY = 'hh:profiles';   // { trackName: { mult, n, hits, made } }
@@ -189,8 +269,55 @@ function autoLearn(track) {
   setTimeout(() => { learnTrack(track); if (S.key) rescoreAll(); render(); }, 60);
 }
 function effMult() { const p = activeProfile(); return p ? { ...DEFAULT_MULT, ...p.mult } : S.mult; }
-function scoreOne(r) {
-  scoreRace(r, { today: S.today, year: S.year, mult: effMult(), driverTable: S.driverTable, scratched: S.st.scratches[r.number] || [], cond: S.st.cond || 'fast' });
+function scoreOpts(r) {
+  return { today: S.today, year: S.year, mult: effMult(), driverTable: S.driverTable, scratched: S.st.scratches[r.number] || [], cond: S.st.cond || 'fast',
+    book: S.book, base: S.prefs.baseAuto !== false, season: S.prefs.season !== false };
+}
+function scoreOne(r) { scoreRace(r, scoreOpts(r)); }
+
+// ---------------- track book: what we know and learn about each track ----------------
+const TRACKS_KEY = 'hh:tracks';   // { trackName: { code, size, plays, post_tm, cards: { date: races } } }
+// learned from the results you've entered at this track: wins by post, and whether winners had early or late speed
+function trackLearn(name) {
+  const wins = [], starts = [];
+  let n = 0, early3 = 0, close3 = 0;
+  for (const [key, st] of allStates()) {
+    if (key.split('|')[0] !== name) continue;
+    for (const [rn, fin] of Object.entries(st.results || {})) {
+      const snap = st.snaps && st.snaps[rn], w = (fin || [])[0];
+      if (!snap || !snap.feat || !w || !snap.feat.some(([p]) => p === w)) continue;
+      n++;
+      for (const [p] of snap.feat) starts[p - 1] = (starts[p - 1] || 0) + 1;
+      wins[w - 1] = (wins[w - 1] || 0) + 1;
+      const rankBy = (k) => { const vals = snap.feat.map(([p, f]) => [p, (f && f.c && f.c[k]) ?? 0.5]).sort((a, b) => b[1] - a[1]); return vals.findIndex(([p]) => p === w) + 1; };
+      if (rankBy('early') <= 3) early3++;
+      if (rankBy('close') <= 3) close3++;
+    }
+  }
+  const len = Math.max(wins.length, starts.length);
+  for (let i = 0; i < len; i++) { wins[i] = wins[i] || 0; starts[i] = starts[i] || 0; }
+  const e = n ? early3 / n : null, c = n ? close3 / n : null;
+  let suggest = null;
+  if (n >= 30) suggest = e - c >= 0.15 ? 'speed' : c - e >= 0.05 ? 'closers' : 'size';
+  return { n, res_post: { wins, starts }, early3: e, close3: c, suggest };
+}
+function bookFor(name) {
+  const b = LS.get(TRACKS_KEY, {})[name] || {};
+  return { ...b, ...trackLearn(name) };
+}
+// remember the track when a program loads: size, code, and the program's own post table if it prints one
+function noteTrack(card) {
+  const books = LS.get(TRACKS_KEY, {}), name = card.track;
+  if (!name) return;
+  const r0 = card.races.find((r) => r.track_code) || {};
+  const b = books[name] || { plays: 'auto', cards: {} };
+  b.code = r0.track_code || b.code; b.size = r0.track_size ?? b.size;
+  b.cards = b.cards || {}; b.cards[card.date || '?'] = card.races.length;
+  b.has_rating = card.races.some((r) => r.horses.some((h) => h.post_rating != null));
+  const ps = card.post_stats;
+  if (ps && !ps.generic && ps.fast && ps.fast.win && (!b.post_tm || !b.post_tm.date || new Date(card.date) >= new Date(b.post_tm.date))) b.post_tm = { ...ps, date: card.date };
+  books[name] = b;
+  LS.set(TRACKS_KEY, books);
 }
 const saveState = () => LS.set(stateKey(S.key), S.st);
 
@@ -413,7 +540,7 @@ function extraLine(h) {
   const m = h.m, x = [];
   if (h.claim) x.push(`clm ${h.claim}`);
   if (h.equip_note) x.push(h.equip_note.charAt(0) + h.equip_note.slice(1).toLowerCase().replace('lasix', 'Lasix'));
-  if (m && m.thrown) x.push(`${m.thrown} of L5 thrown out`);
+  if (m && m.thrown) x.push(`${m.thrown} of L4 thrown out`);
   if (m && m.ship) x.push(`last raced at ${(m.last_track || '').replace(/[ÁÂ½1]$/, '')}`);
   return x.join(' · ');
 }
@@ -532,7 +659,7 @@ function renderRace(n) {
   <div class="racenav"><a class="btn small" href="#/">← Card</a>
     <div class="tabs">${S.card.races.map((x) => `<a href="#/race/${x.number}" class="${x.number === n ? 'on' : ''}">${x.number}</a>`).join('')}</div></div>
   <div id="raceTop">${raceTopHtml(r)}</div>
-  <div class="tunebar"><button class="btn small ${S.tuneOpen ? 'primary' : ''}" data-act="tune" aria-expanded="${S.tuneOpen}">${S.tuneOpen ? 'Hide weights' : 'Tune weights'}</button><span id="wbadge">${weightsBadge()}</span></div>
+  <div class="tunebar"><button class="btn small ${S.tuneOpen ? 'primary' : ''}" data-act="tune" aria-expanded="${S.tuneOpen}">${S.tuneOpen ? 'Hide weights' : 'Tune weights'}</button><span id="wbadge">${weightsBadge()}</span>${r.base_parts && r.base_parts.length ? `<span class="note">Normal here: ${esc(r.base_parts.join(' · '))}</span>` : ''}</div>
   ${S.tuneOpen ? tuneHtml(true) : ''}
   <div id="raceBody">${raceBodyHtml(r)}</div>
   <div class="notes">
@@ -853,16 +980,52 @@ function suggestionHtml() {
   return `<div class="panel"><h3>Suggested weights from your record</h3>${body}</div>`;
 }
 
+// ---------------- render: track book ----------------
+const PLAYS_TEXT = { speed: 'Plays fast (speed)', closers: 'Fair to closers', size: 'Plays to its size' };
+function renderTracks() {
+  const books = LS.get(TRACKS_KEY, {});
+  const names = [...new Set([...Object.keys(books), ...(S.card ? [S.card.track] : [])])].filter(Boolean).sort();
+  const rows = names.map((name) => {
+    const b = bookFor(name), code = b.code || '', info = TRACK_INFO[code] || {};
+    const size = b.size ?? info.size, sl = SIZE_LABEL[size] || '—';
+    const auto = info.plays ? PLAYS_TEXT[info.plays] : PLAYS_TEXT.size;
+    const sel = `<select data-plays="${esc(name)}" aria-label="How ${esc(name)} plays">
+      <option value="auto" ${!b.plays || b.plays === 'auto' ? 'selected' : ''}>Research: ${esc(auto)}</option>
+      ${['size', 'speed', 'closers'].map((k) => `<option value="${k}" ${b.plays === k ? 'selected' : ''}>${PLAYS_TEXT[k]}</option>`).join('')}</select>`;
+    // post table this track uses right now, posts 1-10
+    const st = b.res_post ? b.res_post.starts.reduce((a, x) => a + x, 0) : 0;
+    const gen = GENERIC_POST[size] || GENERIC_POST[0.625];
+    let src, idx;
+    if (b.post_tm) { src = `program table (${esc(b.post_tm.date || '')})`; idx = b.post_tm.fast.win.map((v, i) => (b.post_tm.fast.starts && !(b.post_tm.fast.starts[i] > 50) ? null : v)); }
+    else {
+      const w = b.res_post, avg = w && st ? w.wins.reduce((a, x) => a + x, 0) / st : 0;
+      idx = gen.map((g, i) => { const n = w && w.starts[i] || 0; if (!n || !avg) return g; const k = n / (n + 150); return k * 100 * ((w.wins[i] || 0) / n / avg - 1) + (1 - k) * g; });
+      src = st ? `typical ${sl} blended with your results (${b.n} races)` : `typical ${sl} (estimate)`;
+    }
+    if (b.has_rating && !b.post_tm) src = `the program's post rating for each horse (Trackmaster) — typical ${sl} shown for reference`;
+    const posts = idx.slice(0, 10).map((v, i) => (v == null ? `<span class="pp muted">${i + 1}: —</span>` : `<span class="pp ${v >= 20 ? 'gv' : v <= -20 ? 'bv' : ''}">${i + 1}: ${v > 0 ? '+' : ''}${Math.round(v)}</span>`)).join(' ');
+    const learn = b.n ? `${b.n} graded · winners with top-3 early speed ${Math.round(100 * b.early3)}% · top-3 closing ${Math.round(100 * b.close3)}%${b.suggest ? ` → <b>${PLAYS_TEXT[b.suggest]}</b>${b.plays !== b.suggest ? ` <button class="btn small" data-setplays="${esc(name)}|${b.suggest}">Use</button>` : ''}` : ` <span class="note">(suggestion at 30)</span>`}` : '<span class="muted">No results entered yet</span>';
+    return `<tr><td><b>${esc(name)}</b><br><span class="note">${esc(code)} · ${Object.keys(b.cards || {}).length} program${Object.keys(b.cards || {}).length === 1 ? '' : 's'}</span></td>
+      <td>${sl}</td><td>${sel}${info.note ? `<div class="note">${esc(info.note)}</div>` : ''}</td>
+      <td><div class="note">${src}</div><div class="pps">${posts}</div></td><td>${learn}</td></tr>`;
+  }).join('');
+  return `<div class="cardhead"><div><h1>Track book</h1><div class="sub">What the site knows about each track — it builds as you load programs and enter results. Stored in this browser; Export record on the Record page carries it to another device.</div></div></div>
+  <div class="panel"><table class="rec tracks"><thead><tr><th>Track</th><th>Size</th><th>Plays like</th><th>Post index (% vs an average post)</th><th>From your results</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="5" class="muted">Load a program to start.</td></tr>'}</tbody></table>
+  <p class="note">Post index: a program's own post table always wins. Otherwise the site uses the last table it saw for that track, then your results (blended in — 150 starts from a post counts half), then a typical table for the track size. "Plays like" starts from published handicapping research; once a track has 30+ graded races the site compares winners' early speed vs closing speed and suggests a setting.</p></div>`;
+}
+
 // ---------------- render: settings ----------------
 function methodHtml() {
   const wt = Object.entries(DEFAULT_WEIGHTS).map(([k, v]) => `${WEIGHT_LABELS[k].toLowerCase()} ${v}`).join(', ');
   return `<div class="panel method"><h3>How the numbers are built</h3>
   <p><b>Mile-adjusted times (*)</b>: every time is converted to a mile-track equivalent (half-mile −2.0s, ⅝ −1.0s, ⅞ −0.4s; quarters get ¼ of that), then corrected for the program's track variant (0.2s per point, capped at ±1.6s), which also covers off tracks.</p>
-  <p><b>Avg mark</b>: average final time over the last 5 starts, throwing out breaks, parked-out trips (3-wide at any call or first-over at 3+ calls), qualifiers and DNFs — only races from the last 120 days when there are any.</p>
-  <p><b>Open ¼</b>: estimated time at the first quarter (leader's quarter + 0.2s per length behind) and average position there. <b>Close ¼</b>: the horse's own last quarter. <b>¾→Fin</b>: average spots gained or lost from the 3/4 call to the wire. <b>Avg fin L3</b>: average finish over the last 3 real starts.</p>
-  <p><b>Post position</b> uses the track's real win rate from each post — from the program's post-position table when it has one (fast or off track, blended 75/25 with the last 30 days), otherwise each horse's post rating. Tracks where post matters more (half-miles) have bigger swings, so post counts for more there automatically.</p>
+  <p><b>Track normal</b>: "Normal" changes with the race. Half-mile tracks count early speed 1.75× and closing 0.6× (leavers, pocket and first-over horses win most there); ⅝ tracks early 1.25×, closing 0.9×; ⅞ early 0.9×, closing 1.25×; mile tracks early 0.75×, closing 1.5×. Trotters count early speed less (0.85×) and closing, form, class and post a little more. A track that plays fast or fair to closers tilts it further (Track book), and Dec–Mar cards lean slightly toward closers. Your own settings multiply on top.</p>
+  <p><b>Avg mark</b>: average final time over the last 4 starts, throwing out breaks, parked-out trips (3-wide at any call or first-over at 3+ calls), qualifiers and DNFs — only races from the last 120 days when there are any.</p>
+  <p><b>Open ¼</b>: estimated time at the first quarter (leader's quarter + 0.2s per length behind) and average position there. <b>Close ¼</b>: the horse's own last quarter. <b>¾→Fin</b>: average spots gained or lost from the 3/4 call to the wire. <b>Avg fin L3</b>: average finish over the last 3 real starts (the score uses the last 4). <b>Speed</b> is one number: average speed rating 55%, average adjusted mile 25%, best rating 20%, last 4 clean starts. <b>Beaten lengths</b>, <b>last-start odds</b>, <b>days since last start</b> (7–21 best) and <b>track-size fit</b> (speed ratings on today's size vs his other sizes) also count.</p>
+  <p><b>Post position</b> uses the track's real win rate from each post — the program's post table when it has one (fast or off, blended 75/25 with the last 30 days), else the horse's post rating, else the last table saved for that track, else a typical table for the size blended with your own results there. Half-mile: rail best, post 8 worst; ⅝: posts 4–5 best; ⅞ and mile: posts 5–6 best.</p>
   <p><b>Speed trend</b>: the slope of speed figures over the last 3–4 starts without a break — rising horses get credit, sliding ones lose it. <b>Hot / cold</b>: driver UDR and trainer UTR over the last 30 days vs the year. <b>Connections &amp; course</b>: the driver/trainer team's record together, the horse's record at this track, and a first or second start for a new barn (better or weaker trainer). <b>Off-track</b> (only when the track is set to Off): the horse's off-track record vs its overall record, plus the sire's off-track win rate. <b>Trotters</b>: breaks count over the last 10 lines (qualifiers too), a break last time adds more, and a trotter with no breaks in its last 6+ starts gets a pro.</p>
-  <p><b>Standard USTA programs</b> (most tracks) don't print speed or class ratings, so speed figures are built from each mile time — adjusted for track size and the off-track variant, on the same scale as Trackmaster's ratings (within about ±5 points). Driver and trainer stats there are for the current meet, so small samples are pulled toward average. They don't print post-position stats either, so post uses a typical post index for the track's size until we load the track's real numbers.</p>
+  <p><b>Standard USTA programs</b> (most tracks) don't print speed or class ratings, so speed figures are built from each mile time — adjusted for track size and the off-track variant, on the same scale as Trackmaster's ratings (within about ±5 points). Driver and trainer stats there are for the current meet, so small samples are pulled toward average.</p>
   <p> <b>TM ratings</b> (Power, Speed, Pace, Class) are TrackMaster's own numbers from Platinum programs; they're shown for reference and highlighted, but not scored.</p>
   <p><b>Green / red</b>: the best and worst number in the race for each column (marks compared mile-adjusted; win % needs 5+ lifetime or 3+ this-year starts).</p>
   <p><b>Class</b>: average class rating of the last 3 races versus today's, plus a circuit adjustment for shippers (Yonkers, the Meadowlands and Mohawk tougher; Vernon, Tioga, fairs softer).</p>
@@ -871,11 +1034,11 @@ function methodHtml() {
   <p><b>Trifecta call</b>: KEY the top pick over the next three when he stands alone (4/5 confidence, 22%+ to win and 1.35× the second choice — or 3/5+, 26%+ and 1.45×); otherwise BOX the top three. Exacta follows the same call but always uses two horses (key over the next two, or box the top two); superfecta is only played when the trifecta is a KEY and the undercard is 3/5+ — the top pick over the next three, 6 combos, so it stays cheap; otherwise pass.</p>
   <p><b>Value</b> (morning line vs our line): <span class="gv">good value</span> = ML at least 1.75× our line and 2+ points longer (ML 10-1, our line 5-1). <span class="bv">Bad value</span> = our line at least 2× the ML and 2+ points longer, on horses 8-1 or shorter (ML 5-1, our line 10-1). <b>Longshot trifectas</b> are built around the good-value horses: the tickets the model gives a real chance that the morning line prices much lower (model % vs ML %).</p>
   <p><b>Multi-race tickets</b> single a horse when he's 5/5 and 35%+ (or clears the style's coverage alone) and otherwise add horses in projected order until the leg covers 45% (tight), 60% (balanced) or 75% (wide) of the model's win chance.</p>
-  <p><b>Opening speed</b> combines average position at the first quarter with the estimated opening-quarter time. <b>Season / lifetime mark</b> uses this year's mark, mile-adjusted (the lifetime mark, slightly discounted, if there's none this year).</p>
+  <p><b>Opening speed</b> combines average position at the first quarter with the estimated opening-quarter time. Season and lifetime marks are shown but no longer scored — recent races say more.</p>
   <p><b>Default weights</b>: ${wt}. Your settings multiply these (2× doubles a weight, Off sets it to zero); the race-shape bonuses and penalties scale the same way. <b>Bold</b> pros and cons are the race-deciding ones.</p></div>`;
 }
 function renderSettings() {
-  return `<div class="cardhead"><div><h1>Settings</h1><div class="sub">Put more or less weight on what you trust. Every race re-ranks with your settings, and they stay in this browser — a friend's phone keeps their own. ${weightsBadge()}</div></div>
+  return `<div class="cardhead"><div><h1>Settings</h1><div class="sub">Put more or less weight on what you trust. Every race re-ranks with your settings, and they stay in this browser — a friend's phone keeps their own. <span id="wbadge2">${weightsBadge()}</span></div></div>
     <div class="row"><button class="btn small" data-act="reset-weights">Back to normal</button></div></div>
   ${tuneHtml()}
   <div class="panel" style="margin-top:12px"><h3>Share your settings</h3>
@@ -1170,6 +1333,7 @@ function render() {
   };
   if (route === 'settings') return show(renderSettings(), 'settings');
   if (route === 'record') return show(renderRecord(), 'record');
+  if (route === 'tracks') return show(renderTracks(), 'tracks');
   if (!S.key) {
     upload.hidden = false; view.hidden = !S.shared; view.innerHTML = sharedBanner();
     renderRecent(); return;
@@ -1190,9 +1354,16 @@ function renderRecent() {
 
 // ---------------- events ----------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn],[data-cbudget]');
+  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn],[data-cbudget],[data-setplays]');
   if (!t) return;
   const act = t.dataset.act;
+  if (t.dataset.setplays) {
+    const [name, v] = t.dataset.setplays.split('|'); const books = LS.get(TRACKS_KEY, {}); books[name] = { ...(books[name] || { cards: {} }), plays: v }; LS.set(TRACKS_KEY, books);
+    if (S.key) rescoreAll(); render(); return;
+  }
+  if (act === 'toggle-base') { S.prefs.baseAuto = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
+  if (act === 'toggle-season') { S.prefs.season = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
+  if (act === 'adv') { S.advOpen = !t.closest('details').open; return; }
   if (t.dataset.cbudget) { S.prefs.cardBudget = +t.dataset.cbudget; LS.set(PREF_KEY, S.prefs); render(); return; }
   if (t.dataset.cond) {
     S.st.cond = t.dataset.cond; saveState(); rescoreAll(); render(); return;
@@ -1289,11 +1460,11 @@ document.addEventListener('click', (e) => {
     let nApplied = 0;
     for (const b of boxes) if (b.checked) { applyResult(+b.dataset.pr, S.pasted.found[+b.dataset.pr].order); nApplied++; }
     saveState(); S.pasted = null; location.hash = '#/record'; render();
-    if (S.card) autoLearn(S.card.track);
+    if (S.card) { autoLearn(S.card.track); rescoreAll(); }
     if (nApplied) setTimeout(() => alert(`Applied results for ${nApplied} race${nApplied > 1 ? 's' : ''}.`), 50);
   } else if (act === 'export') {
     const cards = LS.get(CARDS_KEY, {});
-    const out = { exported: new Date().toISOString(), cards: {} };
+    const out = { exported: new Date().toISOString(), cards: {}, tracks: LS.get(TRACKS_KEY, {}), profiles: LS.get(PROFILE_KEY, {}) };
     for (const [k, st] of allStates()) out.cards[k] = { track: cards[k]?.track || k.split('|')[0], date: cards[k]?.date || k.split('|')[1] || '', state: st };
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' }));
@@ -1304,6 +1475,10 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', async (e) => {
   const t = e.target;
   if (t.id === 'file') return loadFile(t.files[0]);
+  if (t.dataset.plays) {
+    const books = LS.get(TRACKS_KEY, {}); books[t.dataset.plays] = { ...(books[t.dataset.plays] || { cards: {} }), plays: t.value }; LS.set(TRACKS_KEY, books);
+    if (S.key) rescoreAll(); render(); return;
+  }
   if (t.dataset.res) {
     const n = +t.dataset.res;
     const arr = [...(S.st.results[n] || [null, null, null, null])];
@@ -1323,7 +1498,9 @@ document.addEventListener('change', async (e) => {
         const cur = LS.get(stateKey(k), null);
         LS.set(stateKey(k), cur ? { ...v.state, ...cur, results: { ...v.state.results, ...cur.results }, snaps: { ...v.state.snaps, ...cur.snaps } } : v.state);
       }
-      if (S.key) S.st = { ...S.st, ...LS.get(stateKey(S.key), {}) };
+      if (data.tracks) { const cur = LS.get(TRACKS_KEY, {}); for (const [k, v] of Object.entries(data.tracks)) cur[k] = { ...v, ...(cur[k] || {}), cards: { ...(v.cards || {}), ...((cur[k] || {}).cards || {}) } }; LS.set(TRACKS_KEY, cur); }
+      if (data.profiles) LS.set(PROFILE_KEY, { ...data.profiles, ...LS.get(PROFILE_KEY, {}) });
+      if (S.key) { S.st = { ...S.st, ...LS.get(stateKey(S.key), {}) }; rescoreAll(); }
       render();
     } catch { alert("That file isn't a Harness Handicapper record."); }
   }
@@ -1332,19 +1509,17 @@ document.addEventListener('change', async (e) => {
 document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.dataset.notes) { S.st.notes[t.dataset.notes] = t.value; saveState(); }
-  if (t.dataset.m) {
-    const k = t.dataset.m, x = +t.value;
-    S.mult[k] = x;
-    const o = $('#mo-' + k);
-    o.textContent = multText(x); o.className = x > 1 ? 'up' : x < 1 ? 'down' : '';
-    saveMult();
-    document.querySelectorAll('[data-preset]').forEach((b) => b.classList.toggle('primary', b.dataset.preset === presetName()));
+  if (t.dataset.m || t.dataset.g) {
+    if (t.dataset.m) S.mult[t.dataset.m] = +t.value; else setGroup(t.dataset.g, +t.value);
+    saveMult(); syncTune();
     clearTimeout(S._wt);
     S._wt = setTimeout(() => {
       if (!S.key) return;
       const r = curRace() && raceOf(curRace());
       if (r) { scoreOne(r); $('#raceTop').innerHTML = raceTopHtml(r); $('#raceBody').innerHTML = raceBodyHtml(r); $('#wbadge').innerHTML = weightsBadge(); }
-      S.dirty = true;
+      // full re-rank in the background for the "how many picks change" line
+      clearTimeout(S._wt2);
+      S._wt2 = setTimeout(() => { rescoreAll(); S.dirty = false; const d = $('#tuneDiff'); if (d) d.innerHTML = diffText(); }, 250);
     }, 120);
   }
 });

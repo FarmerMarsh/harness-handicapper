@@ -618,12 +618,7 @@ async function parseUSTA(pdfDoc) {
     card.track_size = ustaSize(home[0]);
     for (const r of card.races) { r.track_code = card.track_code; r.track_size = card.track_size; }
   }
-  // USTA programs don't print post-position stats: use a typical post index for the track size
-  // (% above / below an average post's win rate), labelled as an estimate everywhere it shows.
-  const GEN = { 0.5: ['half-mile', [55, 30, 15, 5, -5, -20, -35, -50, -60, -65]], 0.625: ['⅝-mile', [25, 25, 20, 10, 0, -10, -20, -30, -45, -55]],
-    0.875: ['⅞-mile', [5, 15, 15, 10, 5, 0, -10, -15, -25, -35]], 1: ['mile', [5, 15, 15, 10, 5, 0, -10, -15, -25, -35]] };
-  const g = GEN[card.track_size];
-  if (g) { card.post_stats = { generic: g[0], fast: { win: g[1], starts: null }, off: null, last30: null }; for (const r of card.races) r.post_stats = card.post_stats; }
+  // USTA programs don't print post-position stats: the engine falls back to a saved table, your results, or a typical table for the size
   // expand "MaStLouisJr"-style past-line driver names to the full names on today's card
   const names = [...new Set(card.races.flatMap((r) => r.horses.flatMap((h) => [h.driver, h.trainer])).filter(Boolean))];
   for (const r of card.races) for (const h of r.horses) for (const p of h.pp) {
