@@ -219,9 +219,17 @@ export function isUSTA(ws) {
   return ws.some((w) => /^Tr-[A-Z]/.test(w.text)) && ws.some((w) => /^STARTS-\$/.test(w.text));
 }
 
+// Woodbine / Standardbred Canada program ("ASK FOR HORSE BY PROGRAM NUMBER", °C temps, Wbs7/8 track codes)
+export function isWoodbine(ws) {
+  const t = new Set(ws.map((w) => w.text));
+  return t.has('ASK') && t.has('PROGRAM') && t.has('NUMBER') && ws.some((w) => w.text.includes('CCndVar'));
+}
+
 export async function parseProgram(pdfDoc) {
-  for (let pn = 1; pn <= Math.min(3, pdfDoc.numPages); pn++) {
+  // look past cover, ads and how-to-bet pages for the first race page
+  for (let pn = 1; pn <= Math.min(12, pdfDoc.numPages); pn++) {
     const { words } = await pageWords(await pdfDoc.getPage(pn));
+    if (isWoodbine(words)) return parseWoodbine(pdfDoc);
     if (isUSTA(words)) return parseUSTA(pdfDoc);
   }
   const card = { track: null, date: null, races: [], format: 'trackmaster' };
@@ -624,6 +632,349 @@ async function parseUSTA(pdfDoc) {
   for (const r of card.races) for (const h of r.horses) for (const p of h.pp) {
     p.driver = expandName(p.driver_abbr, names);
     p.trainer = expandName(p.trainer_abbr, names);
+  }
+  return card;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Woodbine / Standardbred Canada programs (Woodbine Mohawk Park, Georgian, Flamboro, Grand River …).
+// Cover, ads and how-to-bet pages are skipped. Race pages: "ASK FOR HORSE BY PROGRAM NUMBER";
+// a race can run onto a second page. Each past line is laid out on a 7-point grid: main line,
+// fraction numerators +1, driver/trainer/finishers +2, variant +3, fraction denominators +4.
+// Back pages give the meet's winning post positions (pace and trot) and "Who's hot" drivers;
+// each race's facing page gives driver/trainer combination stats and late driver changes.
+const WMONS = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+const wbSize = (num, den) => (num === '7' && den === '8' ? 0.875 : num === '5' && den === '8' ? 0.625 : num === '1' && !den ? 1 : 0.5);
+const wbGlyph = (sz) => (sz === 0.875 ? 'Â' : sz === 0.625 ? 'Á' : sz === 1 ? '1' : '');
+
+function wbCall(ws, T, a, b) {
+  const col = ws.filter((w) => w.x0 >= a && w.x0 < b);
+  const main = col.filter((w) => Math.abs(w.top - T) < 0.6 && w.text !== '/').sort((p, q) => p.x0 - q.x0);
+  if (!main.length) return null;
+  const nums = col.filter((w) => w.top - T >= 0.6 && w.top - T < 2.2 && w.text !== '/' && isDigits(w.text));
+  const dens = col.filter((w) => w.top - T >= 2.8 && w.top - T < 5.5 && isDigits(w.text));
+  const raw = main.map((w) => w.text).join(' ').replace(/°/g, 'º');
+  const brk = /x/.test(main[0].text);
+  const parked = (raw.match(/º/g) || []).length;
+  const pm = main[0].text.match(/(\d+)/);
+  const pos = pm ? parseInt(pm[1], 10) : null;
+  let margin = 0;
+  const rest = main.slice(1).map((w) => w.text).join('');
+  if (/^ns|^nse/.test(rest)) margin = 0.05; else if (/^hd|^h$/.test(rest)) margin = 0.1; else if (/^nk/.test(rest)) margin = 0.25;
+  else if (isDigits(rest)) margin = parseInt(rest, 10);
+  if (nums.length && dens.length && +dens[0].text) margin += +nums[0].text / +dens[0].text;
+  return { pos, margin: pos === 1 ? 0 : margin, lead: pos === 1 ? margin : 0, parked, brk, raw };
+}
+
+function wbRow(ws, T, cardYear, cardMonth) {
+  const at = (a, b, d0 = -0.6, d1 = 0.6) => ws.filter((w) => w.x0 >= a && w.x0 < b && w.top - T >= d0 && w.top - T < d1).sort((p, q) => p.x0 - q.x0);
+  const txt = (a, b, d0, d1) => at(a, b, d0, d1).map((w) => w.text).join(' ').trim();
+  const dw = at(14, 40)[0];
+  const dm = dw ? dw.text.match(/^([A-Z][a-z]{2})(\d{1,2})$/) : null;
+  const mo = dm ? WMONS[dm[1]] : 0, yr = mo > cardMonth ? cardYear - 1 : cardYear;
+  const row = { date: dm ? `${dm[2].padStart(2, '0')}${dm[1]}${String(yr).slice(2)}` : '', race_no: txt(40, 47) };
+  const tw = at(46, 66);
+  const code = tw.filter((w) => !isDigits(w.text) && w.text !== '/').map((w) => w.text).join('');
+  const num = (tw.find((w) => isDigits(w.text) && w.x0 > 52) || {}).text;
+  const den = (at(56, 68, 2.8, 5.5).find((w) => isDigits(w.text)) || {}).text;
+  row.size = wbSize(num, den);
+  row.track = code + wbGlyph(row.size);
+  row.temp = +(txt(64, 74).match(/-?\d+/) || [NaN])[0];
+  row.cond = (txt(72, 82).match(/^(ft|gd|sy|sl|my|hy|fr|wf)/) || [''])[0];
+  const vv = txt(78, 92, 2, 4.5).match(/^([+-]?\d+)$/);
+  const varSec = vv ? Math.abs(+vv[1]) : 0;
+  row.var = varSec * 5;
+  row.cls = [txt(88, 137), txt(88, 137, 0.6, 2.2)].filter(Boolean).join(' ').replace(/(^|\s)-?\s*L\b/g, ' ').replace(/\s+/g, ' ').trim();
+  row.med = /(^|\s)L(\s|$)/.test(txt(110, 137)) ? 'L' : '';
+  const p = txt(134, 161).replace(/[^\d]/g, '');
+  row.purse = p ? parseInt(p, 10) : null;
+  const full = ws.filter((w) => w.top - T > -0.8 && w.top - T < 6.5).map((w) => w.text).join(' ');
+  // "TO BE ANNOUNCED" = entered elsewhere, not raced yet — treat like a scratch so it doesn't count
+  row.scratched = /\bscratched\b/i.test(full) || /TO BE ANNOUNCED/.test(full);
+  row.qua = /^Qua/i.test(row.cls);
+  row.lead_q1 = tsec(...numPair(at(160, 176)));
+  row.lead_q2 = tsec(...numPair(at(176, 192)));
+  row.lead_q3 = tsec(...numPair(at(192, 210)));
+  row.lead_fin = tsec(...numPair(at(210, 232)));
+  row.cr = null;
+  const fl = txt(230, 248).replace(/[^\d]/g, '');
+  row.field = fl ? parseInt(fl, 10) : null;
+  row.post_raw = row.scratched ? '' : txt(248, 268);
+  const pp = row.post_raw.match(/\d+/);
+  row.post = pp ? parseInt(pp[0], 10) : null;
+  if (row.scratched) return row;
+  const cols = [[270, 292], [292, 314], [314, 336], [336, 357], [357, 385]];
+  row.calls = cols.map(([a, b]) => wbCall(ws, T, a, b));
+  const q = (a, b) => tsec(...numPair(at(a, b)));
+  row.ind_q = [q(385, 398), q(398, 412), q(412, 426), q(426, 440)];
+  row.last_q = row.ind_q[3];
+  row.horse_time = tsec(...numPair(at(440, 458).filter((w) => !w.text.includes('.'))));
+  const nb = /\bnb\b/i.test(txt(455, 474, -0.8, 2.2));
+  // odds print as 8¹⁰ = 8.10; a favourite gets a diamond (comes through as "H") and ¹⁰ alone = .10
+  const od = at(463, 474).find((w) => /^'?\d\d$/.test(w.text) && w.size < 6);
+  const oi = at(453, 468, -0.6, 2.2).find((w) => isDigits(w.text) && w !== od && w.size > 6);
+  row.odds = nb ? null : od ? (oi ? +oi.text : 0) + +od.text.replace("'", '') / 100 : oi ? +oi.text : null;
+  row.odds_raw = nb ? 'nb' : row.odds != null ? row.odds.toFixed(2) : '';
+  row.fav = at(456, 466).some((w) => w.text === 'H');
+  row.driver_abbr = txt(470, 488, 1, 3.5);
+  row.trainer_abbr = txt(488, 504, 1, 3.5);
+  row.driver = row.driver_abbr;
+  row.order = txt(504, 612, 1, 3.5);
+  row.brk = row.calls.some((c) => c && c.brk);
+  row.dnf = /\b(dnf|pu|dis)\b/i.test(full);
+  row.parked_calls = row.calls.slice(0, 4).filter((c) => c && c.parked >= 1).length;
+  row.parked3w = row.calls.slice(0, 4).some((c) => c && c.parked >= 2);
+  const f = row.calls[4];
+  row.finish = f ? f.pos : null;
+  row.beaten = f ? f.margin : null;
+  const c1 = row.calls[0];
+  if (c1 && row.lead_q1 != null && c1.pos) { row.open_q = row.lead_q1 + 0.2 * (c1.pos > 1 ? c1.margin || 0 : 0); row.open_pos = c1.pos; }
+  else { row.open_q = row.ind_q[0]; row.open_pos = c1 ? c1.pos : null; }
+  row.sr = row.qua || row.brk || row.dnf ? null : usaSR(row.horse_time, row.size, varSec);
+  return row;
+}
+
+// "JamJ" (Jamieson, J) / "HuPa" (Hudon, Pa) / "MacM" → the full name on today's card
+function expandWB(abbr, names) {
+  const m = (abbr || '').match(/^([A-Z][a-z']+)([A-Z][a-z]?)$/);
+  if (!m) return abbr || '';
+  const lp = m[1].toLowerCase(), fp = m[2].toLowerCase();
+  for (const n of names) {
+    const parts = n.replace(/\./g, '').split(/\s+/).filter((x) => !/^(jr|sr|iii|ii)$/i.test(x));
+    if (parts.length < 2) continue;
+    const first = parts[0].toLowerCase(), last = parts.slice(1).join('').toLowerCase().replace(/[^a-z]/g, '');
+    const last1 = parts[parts.length - 1].toLowerCase();
+    if (first.startsWith(fp) && (last.startsWith(lp) || last1.startsWith(lp))) return n;
+  }
+  return `${m[1]}, ${m[2]}`;
+}
+
+function wbMarkFrom(row, x0, x1, ws, T) {
+  // "ft 1:55 3 Wbs 7/8" or "gd Q2:00 1 Wbs 7/8" before the year label
+  const w = row.filter((x) => x.x0 >= x0 && x.x0 < x1);
+  const tm = w.find((x) => /^Q?\d:\d\d$/.test(x.text));
+  if (!tm) return {};
+  const trk = w.find((x) => x.x0 > tm.x0 && /^[A-Za-z]+\d?$/.test(x.text));
+  const fifth = w.find((x) => x.x0 > tm.x0 + 5 && (!trk || x.x0 < trk.x0) && /^\d$/.test(x.text));
+  const after = trk ? [trk] : [];
+  const num = (w.find((x) => /^\d$/.test(x.text) && trk && x.x0 > trk.x0) || {}).text;
+  const den = (ws.find((x) => x.x0 >= x0 && x.x0 < x1 && x.top - T > 2.5 && x.top - T < 5.5 && /^\d$/.test(x.text)) || {}).text;
+  const size = wbSize(num, den);
+  return { mark: tsec(tm.text.replace('Q', ''), fifth ? fifth.text : null), mark_q: tm.text.startsWith('Q'), mark_track: (after.map((x) => x.text).join('') || '') + wbGlyph(size), mark_size: size };
+}
+
+async function parseWoodbine(pdfDoc) {
+  const card = { track: null, date: null, races: [], format: 'woodbine' };
+  const pages = [];
+  for (let pn = 1; pn <= pdfDoc.numPages; pn++) pages.push(await pageWords(await pdfDoc.getPage(pn)));
+  // card date + first post
+  for (const { words } of pages) {
+    const line = words.map((w) => w.text).join(' ');
+    const dm = line.match(/(MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY),?\s+([A-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})/i);
+    if (dm) { card.date = `${titleCase(dm[1])}, ${titleCase(dm[2])} ${+dm[3]}, ${dm[4]}`; const pt = line.match(/POST TIME\s+(\d{1,2}:\d\d)/i); card.first_post = pt ? pt[1] : ''; break; }
+  }
+  const cd = card.date ? new Date(card.date) : new Date();
+  const cardYear = cd.getFullYear(), cardMonth = cd.getMonth();
+  let race = null;
+  pages.forEach(({ words: ws, height }, idx) => {
+    if (!isWoodbine(ws)) return;
+    const rnW = ws.find((w) => w.size > 30 && w.top < 40 && w.x0 < 60 && isDigits(w.text));
+    const line = (t0, t1, x0, x1) => ws.filter((w) => w.top >= t0 && w.top < t1 && w.x0 >= x0 && w.x0 < x1 && w.size < 20).sort((a, b) => (Math.round(a.top) - Math.round(b.top)) || (a.x0 - b.x0)).map((w) => w.text).join(' ');
+    if (rnW) {
+      race = { number: parseInt(rnW.text, 10), horses: [], cr: null, page: idx + 1 };
+      const hdr = line(10, 60, 60, 612);
+      race.gait = (hdr.match(/\b(PACE|TROT)\b/) || [])[1] || '';
+      race.distance = (line(10, 60, 60, 125).match(/(\d+(?:\/\d+)?\s+MILES?)/) || [])[1] || '1 MILE';
+      const pm = hdr.match(/PURSE \$([\d,]+)/);
+      race.purse = pm ? parseInt(pm[1].replace(/,/g, ''), 10) : null;
+      race.wagers = line(10, 34, 120, 612);
+      race.conditions = line(34, 58, 120, 612).replace(/^PURSE \$[\d,]+\.\s*/, '');
+      race.post_time = race.number === 1 ? card.first_post || '' : '';
+      const fav = line(0, 80, 400, 612).match(/PROBABLE FAVOURITES:\s*([\d–-]+)/);
+      race.prog_notes = fav ? [`Program picks: ${fav[1].replace(/–/g, '-')}`] : [];
+      card.races.push(race);
+    }
+    if (!race) return;
+    const nums = ws.filter((w) => w.size > 15 && w.size < 25 && w.x0 < 30 && w.top > 55 && /^\d+$/.test(w.text)).sort((a, b) => a.top - b.top);
+    nums.forEach((nw, i) => {
+      const T = nw.top, b0 = T - 1.5, b1 = i + 1 < nums.length ? nums[i + 1].top - 1.5 : height;
+      const bw = ws.filter((w) => w.top >= b0 && w.top < b1);
+      const rowAt = (dt, tol = 1.2) => bw.filter((w) => Math.abs(w.top - (T + dt)) < tol).sort((a, b) => a.x0 - b.x0);
+      const h = { pgm: parseInt(nw.text, 10), post_no: parseInt(nw.text, 10) };
+      const r1 = rowAt(1);
+      const ml = r1.find((w) => w.x0 >= 40 && w.x0 < 70 && /^\d+-\d+$/.test(w.text));
+      h.ml = ml ? ml.text.replace('-', '/') : '';
+      if (h.ml) { const [a, b] = h.ml.split('/').map(Number); h.ml_dec = b ? a / b : null; } else h.ml_dec = null;
+      const cl = r1.findIndex((w) => w.text === 'CL');
+      h.claim = cl >= 0 && r1[cl + 1] ? r1[cl + 1].text : '';
+      const trI = r1.findIndex((w) => w.text === 'Tr:');
+      const left = r1.filter((w) => w.x0 >= 110 && (trI < 0 || w.x0 < r1[trI].x0));
+      const dn = [];
+      const COLORS = /^(red|blue|white|black|green|yellow|gold|orange|purple|maroon|grey|gray|silver|pink|brown|burgundy|navy|teal|lime|kelly|royal|light|dark|tan|beige|copper|bronze|aqua|turquoise|lavender|magenta|cream|ivory|charcoal|wine|scarlet|columbia|forest|hunter|sky|baby|emerald|cardinal|crimson|rust|mint|peach|plum|violet|indigo|khaki|olive|coral|salmon|fuchsia|hot|neon|lt|dk|blk|wh|wht)$/i;
+      const isColor = (t) => t.split('-').every((x) => COLORS.test(x));
+      for (const w of left) { if (/^\d/.test(w.text) || w.text.startsWith('(') || isColor(w.text)) break; dn.push(w.text); }
+      h.driver = dn.join(' ');
+      // UDR printed without leading zeros (".94" = .094, ".15" = .150), so work it out from the counts
+      const stat = (arr) => { const t = arr.map((w) => w.text).join(' ').match(/\((\d+)-(\d+)-(\d+)-(\d+)-[\d.]+\)/); return t ? { st: +t[1], w: +t[2], r: +t[1] ? +((9 * t[2] + 5 * t[3] + 3 * t[4]) / (9 * t[1])).toFixed(3) : 0 } : null; };
+      const ds = stat(left);
+      h.drv_st = ds ? ds.st : null; h.drv_w = ds && ds.st ? Math.round((100 * ds.w) / ds.st) : null; h.drv_udr = ds ? ds.r : null;
+      if (trI >= 0) {
+        const tw = r1.filter((w) => w.x0 > r1[trI].x0), tn = [];
+        for (const w of tw) { if (w.text.startsWith('(')) break; tn.push(w.text); }
+        h.trainer = tn.join(' ');
+        const ts = stat(tw);
+        h.trn_st = ts ? ts.st : null; h.trn_w = ts && ts.st ? Math.round((100 * ts.w) / ts.st) : null; h.trn_utr = ts ? ts.r : null;
+      } else h.trainer = '';
+      // name + lifetime "(3, 7/8, 1:55 3, 2 $57,580)"
+      const nameRow = bw.filter((w) => w.top - T > 5 && w.top - T < 9.5 && w.x0 >= 44 && w.x0 < 240).sort((a, b) => a.x0 - b.x0);
+      const op = nameRow.findIndex((w) => w.text.startsWith('('));
+      const nsz = nameRow.length ? nameRow[0].size : 9;
+      h.name = (op >= 0 ? nameRow.slice(0, op) : nameRow).filter((w) => /^[A-Z0-9'.&-]+$/.test(w.text) && Math.abs(w.size - nsz) < 0.6).map((w) => w.text).join(' ');
+      const life = (op >= 0 ? nameRow.slice(op) : []).map((w) => ({ ...w, text: w.text.replace(/,$/, '') }));
+      const lt = life.map((w) => w.text).join(' ');
+      const lifeAge = (lt.match(/^\((\d+),/) || [])[1];
+      const lm = life.find((w) => /^\d:\d\d$/.test(w.text));
+      const lf = lm ? life.find((w) => w.x0 > lm.x0 + 5 && w.x0 < lm.x0 + 14 && /^\d$/.test(w.text)) : null;
+      const lsNum = (life.find((w) => /^\d$/.test(w.text) && lm && w.x0 < lm.x0) || {}).text;
+      const lsNumW = life.find((w) => /^\d$/.test(w.text) && lm && w.x0 < lm.x0);
+      const lsDen = lsNumW ? (bw.find((w) => w.top - lsNumW.top > 1.5 && w.top - lsNumW.top < 5.5 && Math.abs(w.x0 - lsNumW.x0 - 3) < 5 && /^\d$/.test(w.text)) || {}).text : undefined;
+      const lwins = lt.match(/,\s*(\d+)\s+\$[\d,]+\)/);
+      const learn = lt.match(/\$([\d,]+)\)/);
+      h.lasix = bw.some((w) => w.text === 'L' && w.x0 > 95 && w.x0 < 135 && w.top - T > 6 && w.top - T < 12);
+      // year rows (this year at T, last year at T+8): mark + starts wins 2nds 3rds $
+      h.stats = {};
+      for (const lab of bw.filter((w) => /^20\d\d$/.test(w.text) && w.x0 > 495 && w.x0 < 515)) {
+        const row = bw.filter((w) => Math.abs(w.top - lab.top) < 1.3).sort((a, b) => a.x0 - b.x0);
+        const n = row.filter((w) => w.x0 > lab.x0 + 10 && w.x0 < 565 && isDigits(w.text)).map((w) => +w.text);
+        const e = row.find((w) => w.text.startsWith('$') && w.x0 > 560);
+        const st = n.length >= 4 ? { starts: n[0], wins: n[1], places: n[2], shows: n[3] } : {};
+        st.earnings = e ? parseInt(e.text.replace(/[$,]/g, ''), 10) : 0;
+        Object.assign(st, wbMarkFrom(row, 440, 500, bw, lab.top));
+        h.stats[lab.text] = st;
+      }
+      // the program only prints this year and last year; "Life" = those two seasons + the lifetime mark and earnings
+      const ys = Object.values(h.stats);
+      const sum = (k) => ys.reduce((a, s) => a + (s[k] || 0), 0);
+      h.stats.Life = { starts: sum('starts'), wins: Math.max(sum('wins'), 0), places: sum('places'), shows: sum('shows'),
+        earnings: learn ? parseInt(learn[1].replace(/,/g, ''), 10) : sum('earnings'), two_seasons: true,
+        life_wins: lwins ? +lwins[1] : null, mark: lm ? tsec(lm.text, lf ? lf.text : null) : null, mark_q: /-Q/.test(lt),
+        mark_size: lm ? wbSize(lsNum, lsDen) : null, mark_age: lifeAge ? +lifeAge : null };
+      h.stats.Life.mark_track = h.stats.Life.mark_size != null ? wbGlyph(h.stats.Life.mark_size) : '';
+      const ped = bw.find((w) => w.text === 'by' && w.x0 > 50 && w.x0 < 80 && w.top - T > 12);
+      h.pedigree = ped ? bw.filter((w) => Math.abs(w.top - ped.top) < 1.2 && w.x0 >= 44 && w.x0 < 340 && !/^Breeder/.test(w.text)).sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ').replace(/\s+Breeder:.*$/, '') : '';
+      const sa = h.pedigree.match(/^(\S+) (\w) (\d+) by/);
+      h.sex = sa ? sa[2] : ''; h.age = sa ? parseInt(sa[3], 10) : null;
+      const l4 = bw.findIndex((w) => w.text === 'Last' && bw[bw.indexOf(w) + 1] && bw[bw.indexOf(w) + 1].text === '4');
+      const l4w = bw.filter((w) => /^\$[\d,]+$/.test(w.text) && w.x0 > 470 && w.x0 < 500 && ped && Math.abs(w.top - ped.top) < 1.5);
+      h.earn_l5 = l4w.length ? parseInt(l4w[0].text.replace(/[$,]/g, ''), 10) : null;
+      void l4;
+      h.post_rating = null;
+      h.equip_note = '';
+      const anchors = bw.filter((w) => w.x0 < 30 && /^[A-Z][a-z]{2}\d{1,2}$/.test(w.text) && w.text.slice(0, 3) in WMONS).sort((a, b) => a.top - b.top);
+      h.pp = anchors.map((a, k) => {
+        const hi = k + 1 < anchors.length ? anchors[k + 1].top - 1 : b1;
+        return wbRow(bw.filter((w) => w.top >= a.top - 1 && w.top < hi), a.top, cardYear, cardMonth);
+      });
+      race.horses.push(h);
+    });
+  });
+  card.races.sort((a, b) => a.number - b.number);
+  // facing pages: driver/trainer combos and late changes; back pages: post positions + who's hot
+  pages.forEach(({ words: ws }) => {
+    const hdr = ws.find((w) => w.text === 'Driver/Trainer');
+    if (hdr) {
+      const rn = (ws.filter((w) => Math.abs(w.top - hdr.top) < 1.5 && /^\d+:$/.test(w.text))[0] || {}).text;
+      const r = rn && card.races.find((x) => x.number === parseInt(rn, 10));
+      if (r) {
+        const rows = {};
+        for (const w of ws.filter((x) => x.top > hdr.top + 12 && x.top < hdr.top + 200 && x.x0 > 315)) (rows[Math.round(w.top)] ||= []).push(w);
+        for (const row of Object.values(rows)) {
+          row.sort((a, b) => a.x0 - b.x0);
+          if (!isDigits(row[0].text) || row[0].x0 > 332) continue;
+          const pg = +row[0].text, st = row.find((w) => w.x0 > 450 && w.x0 < 485 && isDigits(w.text)), wp = row.find((w) => /^\d+%$/.test(w.text));
+          const h = r.horses.find((x) => x.pgm === pg);
+          if (h && st && wp) h.drtr = { st: +st.text, w: parseInt(wp.text, 10), itm: null, r: null };
+        }
+        // late changes listed under "RACE n SCRATCH TIME CHANGES"
+        const sc = ws.find((w) => w.text === 'SCRATCH' && w.x0 < 120);
+        if (sc) {
+          const lines = {};
+          for (const w of ws.filter((x) => x.top > sc.top + 4 && x.top < sc.top + 130 && x.x0 < 290 && x.size < 11.5)) (lines[Math.round(w.top)] ||= []).push(w);
+          const ch = Object.keys(lines).map(Number).sort((a, b) => a - b).map((t) => lines[t].sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ')).filter((t) => t && !/^NO CHANGES$/.test(t) && !/^R\.O\.I/.test(t));
+          if (ch.length) r.prog_notes = [...(r.prog_notes || []), `Changes: ${ch.join(' · ')}`];
+        }
+      }
+    }
+    const pw = ws.find((w) => w.text === 'Winning' && ws.some((x) => x.text === 'Positions' && Math.abs(x.top - w.top) < 1.5));
+    if (pw && !card.post_stats) {
+      const grab = (label) => {
+        const lab = ws.find((w) => w.text === label && w.x0 < 40 && w.top > pw.top);
+        if (!lab) return null;
+        const rowOf = (name) => { const w = ws.find((x) => x.text === name && x.x0 < 40 && x.top > lab.top && x.top < lab.top + 50); return w ? ws.filter((x) => Math.abs(x.top - w.top) < 1.5 && x.x0 > 55 && x.x0 < 300).sort((a, b) => a.x0 - b.x0).map((x) => parseFloat(x.text)) : null; };
+        const starts = rowOf('Starts'), wins = rowOf('Win');
+        if (!starts || !wins || starts.length !== wins.length) return null;
+        const S = starts.reduce((a, b) => a + b, 0), W = wins.reduce((a, b) => a + b, 0);
+        return { win: starts.map((s, i) => (s ? 100 * ((wins[i] / s) / (W / S) - 1) : 0)), starts, pct: starts.map((s, i) => (s ? (100 * wins[i]) / s : 0)) };
+      };
+      const pace = grab('Pace'), trot = grab('Trot');
+      if (pace) card.post_stats = { fast: pace, trot, off: null, last30: null, src: 'program (meet to date)' };
+    }
+    const hot = ws.find((w) => w.text === '20' && ws.some((x) => x.text === 'Days' && Math.abs(x.top - w.top) < 1.5 && x.x0 > w.x0) && ws.some((x) => x.text === 'Last' && Math.abs(x.top - w.top) < 1.5)
+      && ws.some((x) => x.text === 'DRIVERS' && x.top > w.top && x.top < w.top + 25 && Math.abs(x.x0 - (w.x0 - 100)) < 90));
+    if (hot) {
+      const x0 = hot.x0 - 120, x1 = x0 + 300;
+      const rows = {};
+      for (const w of ws.filter((x) => x.top > hot.top + 20 && x.top < hot.top + 130 && x.x0 >= x0 && x.x0 < x1)) (rows[Math.round(w.top)] ||= []).push(w);
+      card.hot_drivers = card.hot_drivers || {};
+      for (const row of Object.values(rows)) {
+        row.sort((a, b) => a.x0 - b.x0);
+        const i = row.findIndex((w) => isDigits(w.text));
+        if (i < 1) continue;
+        const name = row.slice(0, i).map((w) => w.text).join(' ');
+        const n = row.slice(i).map((w) => w.text);
+        if (n.length >= 6 && !(name in card.hot_drivers)) card.hot_drivers[name] = { st: +n[0], w: +n[1], r: parseFloat(n[5]) };
+      }
+    }
+  });
+  // home track from everyone's last start
+  const cnt = {};
+  for (const r of card.races) for (const h of r.horses) { const p = h.pp.find((x) => !x.scratched && !x.qua) || h.pp[0]; if (p && p.track) cnt[p.track] = (cnt[p.track] || 0) + 1; }
+  const home = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0];
+  const NAMES = { Wbs: 'Woodbine Mohawk Park', GeoD: 'Georgian Downs', FlmD: 'Flamboro Downs', Grvr: 'Grand River Raceway', Lon: 'Western Fair Raceway', KD: 'Kawartha Downs', Rcdu: 'Rideau Carleton', Hnvr: 'Hanover Raceway', Clntn: 'Clinton Raceway', Trrvs: 'Hippodrome 3R' };
+  if (home) {
+    card.track_code = home[0].replace(/[ÁÂ1]$/, '');
+    card.track_size = home[0].endsWith('Â') ? 0.875 : home[0].endsWith('Á') ? 0.625 : home[0].endsWith('1') ? 1 : 0.5;
+    card.track = NAMES[card.track_code] || card.track_code;
+    for (const r of card.races) { r.track_code = card.track_code; r.track_size = card.track_size; if (card.post_stats) r.post_stats = card.post_stats; }
+  }
+  // late driver changes ("SHADOW PRINCESS Tyler Borth to Louis Philippe Roy"): put the new driver on, with his stats from elsewhere on the card
+  const dstats = {};
+  for (const r of card.races) for (const h of r.horses) if (h.driver && h.drv_st != null) dstats[h.driver.toLowerCase().replace(/[^a-z]/g, '')] = { driver: h.driver, drv_st: h.drv_st, drv_w: h.drv_w, drv_udr: h.drv_udr };
+  for (const r of card.races) {
+    const ch = (r.prog_notes || []).find((n) => n.startsWith('Changes: '));
+    if (!ch) continue;
+    for (const part of ch.slice(9).split(' · ')) {
+      const m = part.match(/^(.+?)\s+([A-Z][\w'.-]+(?:\s+[A-Z][\w'.-]+)+?)\s+to\s+(.+)$/);
+      if (!m) continue;
+      const h = r.horses.find((x) => part.startsWith(x.name + ' '));
+      if (!h) continue;
+      const newName = part.slice(part.indexOf(' to ') + 4).trim();
+      const norm = (x) => (x || '').toLowerCase().replace(/[^a-z]/g, '');
+      if (norm(h.driver) === norm(newName)) continue;   // program already shows the new driver
+      const st = dstats[norm(newName)];
+      h.listed_driver = h.driver;
+      if (st) Object.assign(h, st); else { h.driver = newName; h.drv_st = null; h.drv_w = null; h.drv_udr = null; }
+      h.drv30 = undefined;
+      h.equip_note = `Driver change: ${h.listed_driver} → ${h.driver}`;
+    }
+  }
+  const names = [...new Set(card.races.flatMap((r) => r.horses.flatMap((h) => [h.driver, h.trainer, h.listed_driver])).filter(Boolean))];
+  const hotKey = (n) => { const p = n.replace(/[^A-Za-z\s-]/g, '').split(/\s+/); return (p[0][0] + '|' + p[p.length - 1]).toLowerCase(); };
+  const hotMap = {};
+  for (const [n, v] of Object.entries(card.hot_drivers || {})) hotMap[hotKey(n)] = v;
+  for (const r of card.races) for (const h of r.horses) {
+    if (h.driver && hotMap[hotKey(h.driver)]) { const v = hotMap[hotKey(h.driver)]; h.drv30 = { st: v.st, w: v.st ? Math.round((100 * v.w) / v.st) : null, itm: null, r: v.r }; }
+    for (const p of h.pp) { p.driver = expandWB(p.driver_abbr, names); p.trainer = expandWB(p.trainer_abbr, names); }
   }
   return card;
 }

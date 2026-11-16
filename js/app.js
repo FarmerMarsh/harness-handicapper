@@ -1,10 +1,10 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=12';
+import { parseProgram, fmtTime } from './parse.js?v=13';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=12';
+} from './engine.js?v=13';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -282,7 +282,7 @@ async function loadFiles(files) {
   }
   showBusy('');
   pruneCards();
-  if (failed.length) setStatus(`Couldn't find race pages in ${failed.join(', ')}. It reads the standard USTA program the tracks print (Dayton, Scioto, Northfield…) and Trackmaster programs.`, true);
+  if (failed.length) setStatus(`Couldn't find race pages in ${failed.join(', ')}. It reads the standard USTA program (Dayton, Scioto, Northfield…), Woodbine / Standardbred Canada programs (Mohawk, Georgian, Flamboro…) and Trackmaster programs.`, true);
   else setStatus('');
   if (opened.length) { switchTo(opened[0], '#/'); }
 }
@@ -1126,6 +1126,7 @@ function methodHtml() {
   <p><b>Open ¼</b>: estimated time at the first quarter (leader's quarter + 0.2s per length behind) and average position there. <b>Close ¼</b>: the horse's own last quarter. <b>¾→Fin</b>: average spots gained or lost from the 3/4 call to the wire. <b>Avg fin L3</b>: average finish over the last 3 real starts (the score uses the last 4). <b>Speed</b> is one number: average speed rating 55%, average adjusted mile 25%, best rating 20%, last 4 clean starts. <b>Beaten lengths</b>, <b>last-start odds</b>, <b>days since last start</b> (7–21 best) and <b>track-size fit</b> (speed ratings on today's size vs his other sizes) also count.</p>
   <p><b>Post position</b> uses the track's real win rate from each post — the program's post table when it has one (fast or off, blended 75/25 with the last 30 days), else the horse's post rating, else the last table saved for that track, else a typical table for the size blended with your own results there. Half-mile: rail best, post 8 worst; ⅝: posts 4–5 best; ⅞ and mile: posts 5–6 best.</p>
   <p><b>Speed trend</b>: the slope of speed figures over the last 3–4 starts without a break — rising horses get credit, sliding ones lose it. <b>Hot / cold</b>: driver UDR and trainer UTR over the last 30 days vs the year. <b>Connections &amp; course</b>: the driver/trainer team's record together, the horse's record at this track, and a first or second start for a new barn (better or weaker trainer). <b>Off-track</b> (only when the track is set to Off): the horse's off-track record vs its overall record, plus the sire's off-track win rate. <b>Trotters</b>: breaks count over the last 10 lines (qualifiers too), a break last time adds more, and a trotter with no breaks in its last 6+ starts gets a pro.</p>
+  <p><b>Woodbine / Standardbred Canada programs</b> (Mohawk, Georgian, Flamboro…): cover, ad and how-to-bet pages are skipped. They print only this year and last year, so the "Life" win % and top-3 % are those two seasons (the lifetime mark and earnings are the real ones). Speed figures are built from the time like USTA programs. The program's own winning-post-position table (pace and trot separately), "Who's hot" drivers (last 20 days), driver/trainer combination stats and late driver changes are all read in.</p>
   <p><b>Standard USTA programs</b> (most tracks) don't print speed or class ratings, so speed figures are built from each mile time — adjusted for track size and the off-track variant, on the same scale as Trackmaster's ratings (within about ±5 points). Driver and trainer stats there are for the current meet, so small samples are pulled toward average.</p>
   <p> <b>TM ratings</b> (Power, Speed, Pace, Class) are TrackMaster's own numbers from Platinum programs; they're shown for reference and highlighted, but not scored.</p>
   <p><b>Green / red</b>: the best and worst number in the race for each column (marks compared mile-adjusted; win % needs 5+ lifetime or 3+ this-year starts).</p>

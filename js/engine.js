@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=12';
+import { fmtTime } from './parse.js?v=13';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -66,6 +66,7 @@ export const TRACK_INFO = {
   Dtn: { size: 0.625, plays: null, note: 'No published post stats yet — learning from results' },
   ScD: { size: 0.625, plays: null, note: 'Learning from results' },
   HoP: { size: 0.875, plays: 'closers', note: 'Tight turns + passing lane help back-runners' },
+  Wbs: { size: 0.875, plays: null, note: 'Woodbine Mohawk: posts 5–6 win 18–22%, rail ~9%; leader at the half wins 42%, favourites 48% (2026 program stats)' },
   Wbsb: { size: 0.875, plays: null, note: 'Posts 5–6 win ~20% each' }, Mohk: { size: 0.875, plays: null, note: 'Posts 5–6 win ~20% each' },
   M: { size: 1, plays: null, note: 'Posts 5–6 best (2026: 15% / 13%); closers in conditioned races, speed in stakes' },
   Lex: { size: 1, plays: null, note: '' },
@@ -140,13 +141,14 @@ export const ADJ = {
 
 // rough circuit tiers (1 = toughest); unknown tracks default to 3
 const TRACK_TIER = {
-  M: 1, YR: 1, Wbsb: 1, Moh: 1, Lex: 1, Mohk: 1,
+  M: 1, YR: 1, Wbsb: 1, Wbs: 1, Moh: 1, Lex: 1, Mohk: 1, FlmD: 3, Grvr: 3, Lon: 3, Trrvs: 3, Rcdu: 3, KD: 4, Hnvr: 4, Clntn: 4, Drsdn: 4, Ldn: 3,
   PcD: 2, Phl: 2, Mea: 2, HoP: 2, DD: 2, ScD: 2, PRc: 2, Har: 2, MVR: 2, DTN: 3, Dtn: 3, Dela: 3, Lex: 1, Nfld: 3, Aces: 3, Bang: 4, Gosh: 4, Brtn: 4, Nrthv: 3,
   Nfld: 3, Stga: 3, VD: 3, TgDn: 3, Btva: 3, MR: 3, RcR: 3, GeoD: 3, OakGr: 3, Fhld: 3,
   Frybg: 4, Cumb: 4, Farm: 4, Skow: 4, Bang: 4, Scar: 4, Wind: 4, Oxfd: 4, Fair: 4, Topsh: 4, Union: 4, Northam: 4,
   Wdstk: 4, Hstng: 4, Fwvl: 4, Cntrv: 4, Allgn: 4, Elmra: 4, Grtz: 4, Mayfd: 4, Meadv: 4, Spr: 4, Caro: 4, Chfld: 4,
 };
 const TRACK_NAME = {
+  Wbs: 'Mohawk', FlmD: 'Flamboro', Grvr: 'Grand River', Lon: 'Western Fair', Trrvs: 'Trois-Rivières', KD: 'Kawartha', Hnvr: 'Hanover', Clntn: 'Clinton', Rcdu: 'Rideau Carleton', GeoD: 'Georgian',
   M: 'the Meadowlands', YR: 'Yonkers', Wbsb: 'Mohawk', Lex: 'the Red Mile', PcD: 'Pocono', Phl: 'Philly',
   Mea: 'the Meadows', HoP: 'Hoosier', DD: 'Dover', ScD: 'Scioto', Nfld: 'Northfield', Stga: 'Saratoga',
   VD: 'Vernon', TgDn: 'Tioga', Btva: 'Batavia', MR: 'Monticello', RcR: 'Rosecroft', GeoD: 'Georgian', OakGr: 'Oak Grove',
@@ -769,6 +771,9 @@ function postIndex(race, h) {
 }
 function postIndexSrc(race, h) {
   const ps = race.post_stats && !race.post_stats.generic ? race.post_stats : null, post = h.post_no ?? h.pgm;
+  if (ps && ps.trot && race.gait === 'TROT' && ps.trot.win && post >= 1 && post <= ps.trot.win.length && (!ps.trot.starts || ps.trot.starts[post - 1] > 50)) {
+    return { v: ps.trot.win[post - 1], src: 'track win index (trotters)' };
+  }
   if (ps && ps.fast && ps.fast.win && post >= 1 && post <= ps.fast.win.length) {
     const i = post - 1;
     const src = race.cond === 'off' && ps.off && ps.off.starts && ps.off.starts[i] > 50 ? ps.off : ps.fast;
