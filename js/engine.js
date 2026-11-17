@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=17';
+import { fmtTime } from './parse.js?v=18';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -472,19 +472,14 @@ function undercardConf(sim) {
   return 5;
 }
 
+// v18: winner stars follow the win chance, so they always agree with the key rule (over 25% = key):
+// 5 = 32%+, 4 = over 25%, 3 = 22%+, 2 = 19%+, 1 = less. One star off when there is little to go on.
 function confidence(ranked) {
   if (ranked.length < 2) return 3;
-  const s = ranked.map((h) => h.pick ?? h.score);
-  const gap1 = s[0] - s[1];
-  const gap3 = s[0] - s[Math.min(2, s.length - 1)];
-  const top = ranked[0].m;
-  let pts = gap1 / 6.0 + gap3 / 15.0;
-  if (top.clean_n >= 4) pts += 0.5;
-  pts -= Math.min(2, top.brk_l5);
-  if (top.clean_n <= 2) pts -= 1;
-  if (top.avg_fin3 != null && top.avg_fin3 > 4) pts -= 1;
-  if (top.stale) pts -= 1;
-  const c = 1 + pyRound(Math.min(4, Math.max(0, pts)));
+  const p = ranked[0].win_prob, top = ranked[0].m;
+  let c = p >= 0.32 ? 5 : p > KEY_AT ? 4 : p >= 0.22 ? 3 : p >= 0.19 ? 2 : 1;
+  if (ranked[1].win_prob >= p * 0.9 && c > 1 && c < 4) c -= 1;                       // a second horse right with him
+  if (top.clean_n <= 2 || top.stale || top.brk_l5 >= 2) c -= 1;
   return Math.max(1, Math.min(5, c));
 }
 
@@ -811,7 +806,7 @@ function postIndexSrc(race, h) {
   return { v: g, src: `typical ${SIZE_LABEL[race.track_size] || '⅝-mile'} post index` };
 }
 
-export function scoreRace(race, { today, year, mult, driverTable, scratched = [], sim = true, cond = 'fast', book = null, books = null, season = true, base = true, temp = 1, blend = ML_BLEND, live = null }) {
+export function scoreRace(race, { today, year, mult, driverTable, scratched = [], sim = true, cond = 'fast', book = null, books = null, season = true, base = true, temp = 1, blend = ML_BLEND, live = null, drivers = null }) {
   race.cond = cond;
   CUR_TEMP = TEMP * (temp || 1);
   race.temp = CUR_TEMP;
@@ -845,6 +840,16 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
   if (cond !== 'off') W.offtrack = 0;
   const wsum = Object.values(W).reduce((a, b) => a + b, 0);
   const wnorm = wsum > 0 ? BASE_SUM / wsum : 1;
+  // v18: late driver changes entered at the track
+  for (const h of race.horses) {
+    const d = drivers && drivers[h.pgm];
+    if (h._d0 && (!d || d.name !== h.driver)) { Object.assign(h, h._d0); delete h._d0; }
+    if (d && !h._d0 && !sameDriver(d.name, h.driver)) {
+      h._d0 = { driver: h.driver, drv_udr: h.drv_udr, drv_st: h.drv_st, drv_w: h.drv_w, drv30: h.drv30, drtr: h.drtr };
+      Object.assign(h, { driver: d.name, drv_udr: d.udr ?? 0.2, drv_st: d.st ?? null, drv_w: d.w ?? null, drv30: d.drv30 ?? null, drtr: null });
+      h.drv_changed = h._d0.driver;
+    } else if (!h._d0) delete h.drv_changed;
+  }
   for (const h of hs) h.m = horseMetrics(h, race, today, year);
   // v17: leavers = horses that leave at least about half the time once tonight's post is counted
   const early = hs.filter((h) => h.m.leave_t != null && h.m.leave_t >= 0.5 && h.m.clean_n >= 2 && !h.m.stale);
@@ -1047,6 +1052,11 @@ function prosCons(h, hs, race, year) {
     if (d != null && d >= 0.05) P(`Driver upgrade: ${shortName(h.driver)} (UDR ${m.driver_udr.toFixed(3)}) for ${prev} (${dc.prev_udr.toFixed(3)})`, d >= 0.10 ? 3 : 2);
     else if (d != null && d <= -0.05) C(`Driver downgrade: ${shortName(h.driver)} (${m.driver_udr.toFixed(3)}) for ${prev} (${dc.prev_udr.toFixed(3)})`, 2);
     else if (d == null && 'driver_up' in tags) P(`Picks up top driver ${shortName(h.driver)} (UDR ${m.driver_udr.toFixed(3)}, was ${prev})`, 2);
+  }
+  if (h.drv_changed && h._d0) {
+    const d = (h.drv_udr ?? 0.2) - (h._d0.drv_udr ?? 0.2);
+    const txt = `Late driver change: ${shortName(h.driver)} for ${shortName(h._d0.driver)}`;
+    if (d >= 0.03) P(txt + ' — an upgrade', d >= 0.08 ? 3 : 2); else if (d <= -0.03) C(txt + ' — a downgrade', d <= -0.08 ? 3 : 2); else C(txt, 1);
   }
   if (m.tough.length) {
     const t = m.tough[0];

@@ -478,3 +478,40 @@ details.live summary { cursor: pointer; width: fit-content; }
 .livegrid label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
 .livegrid label i { color: #9ca3af; font-style: normal; }
 .livegrid input { padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; font: inherit; width: 100%; box-sizing: border-box; }
+
+/* v18 */
+details.horse > summary { list-style: none; cursor: pointer; }
+details.horse > summary::-webkit-details-marker { display: none; }
+details.horse[open] > summary .h-line { display: none; }
+.h-line { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; font-size: 12.5px; line-height: 1.3; }
+.h-line .pro { color: var(--green-ink); } .h-line .con { color: var(--red-ink); }
+.horse.r1:not([open]) { padding-bottom: 8px; }
+.hexp { display: none; }
+@media (max-width: 1099px) { .hexp { display: inline-flex; } }
+.plchk { font-size: 11.5px; font-weight: 500; color: var(--muted); display: inline-flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
+.plchk input { margin: 0; }
+.print-root .plchk, .print-root .pinbar, .print-root .hexp { display: none !important; }
+.pinbar { display: none; }
+@media (max-width: 719px) {
+  .pinbar { display: flex; flex-wrap: wrap; gap: 2px 10px; position: fixed; left: 0; right: 0; bottom: 0; z-index: 18; background: var(--navy); color: #fff; padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); font-size: 13px; box-shadow: 0 -2px 10px rgba(0,0,0,.18); }
+  .pinbar .pt { color: #cfd6e4; font-size: 12px; }
+  main { padding-bottom: 96px; }
+}
+.pay { margin: 10px 0 4px; }
+.pay .lbl { font-size: 10.5px; font-weight: 800; letter-spacing: .6px; color: var(--muted); margin-bottom: 4px; }
+.paygrid { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.paygrid label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+.payin { display: inline-flex; align-items: center; gap: 4px; color: var(--ink); }
+.payin input { width: 78px; padding: 5px 7px; border: 1px solid #d1d5db; border-radius: 6px; }
+.payin select { padding: 4px 4px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 12px; background: #fff; }
+details.slip { margin-top: 6px; }
+details.slip > summary { cursor: pointer; font-weight: 700; font-size: 13.5px; width: fit-content; padding: 2px 0; }
+.sliptab td { vertical-align: top; padding: 5px 8px 5px 0; }
+.sliptab td:first-child { white-space: nowrap; width: 1%; }
+.sliptab td.r { text-align: right; white-space: nowrap; width: 1%; }
+.sliptab .sl { display: inline-block; margin-right: 14px; white-space: nowrap; }
+.lategrid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; align-items: start; }
+@media (max-width: 900px) { .lategrid { grid-template-columns: 1fr; } }
+.livegrid.wide { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.livegrid select { padding: 6px 6px; border: 1px solid #d1d5db; border-radius: 6px; font: inherit; width: 100%; background: #fff; }
+table.rec tr.tot td { font-weight: 700; border-top: 2px solid var(--rule); }
