@@ -1,12 +1,12 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=21';
+import { parseProgram, fmtTime } from './parse.js?v=22';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=21';
-import { learnAll, learnedMult } from './learn.js?v=21';
-import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=21';
+} from './engine.js?v=22';
+import { learnAll, learnedMult } from './learn.js?v=22';
+import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=22';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -73,6 +73,21 @@ const STATE_PREFIX = 'hh:state:';
 const stateKey = (k) => STATE_PREFIX + k;   // { scratches, notes, results, snaps, picks }
 const MULT_KEY = 'hh:mult';
 const PREF_KEY = 'hh:prefs';
+
+// dark mode (v22, Marshall): Light / Dark / Auto, default Auto. 'Auto' follows the device's
+// prefers-color-scheme and keeps listening so it flips live if that changes mid-session.
+let _themeMQ = null;
+function applyTheme() {
+  const mode = S.prefs.theme || 'auto';
+  const eff = mode === 'auto' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : mode;
+  document.documentElement.dataset.theme = eff;
+  if (mode === 'auto' && !_themeMQ) {
+    try {
+      _themeMQ = matchMedia('(prefers-color-scheme: dark)');
+      _themeMQ.addEventListener('change', () => { if ((S.prefs.theme || 'auto') === 'auto') applyTheme(); });
+    } catch { /* matchMedia unsupported — Auto just behaves like Light */ }
+  }
+}
 
 const S = {
   key: null, base: null, card: null, st: null,
@@ -432,7 +447,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=21', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=22', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -633,7 +648,7 @@ function renderTrends() {
       const modelPct = p.modelPct != null ? 100 * p.modelPct : null;
       const hot = p.starts >= 3 && actualPct != null && modelPct != null && actualPct - modelPct >= 12;
       const cold = p.starts >= 3 && actualPct != null && modelPct != null && modelPct - actualPct >= 12;
-      return `<tr${hot ? ' style="background:#eafbea"' : cold ? ' style="background:#fdeeee"' : ''}><td>${p.post}</td><td>${p.starts}</td><td>${p.wins}</td><td>${actualPct != null ? Math.round(actualPct) + '%' : '—'}</td><td>${modelPct != null ? Math.round(modelPct) + '%' : '—'}</td></tr>`;
+      return `<tr${hot ? ' style="background:var(--row-hot)"' : cold ? ' style="background:var(--row-cold)"' : ''}><td>${p.post}</td><td>${p.starts}</td><td>${p.wins}</td><td>${actualPct != null ? Math.round(actualPct) + '%' : '—'}</td><td>${modelPct != null ? Math.round(modelPct) + '%' : '—'}</td></tr>`;
     }).join('')}
   </tbody></table>`;
   const pickP = `<p class="note">Our top pick has won <b>${t.topWon}/${t.n}</b> (${pct(t.topWon, t.n)}) and landed in the top 3 of <b>${t.top3}/${t.n}</b> (${pct(t.top3, t.n)}) graded races so far tonight.</p>`;
@@ -649,7 +664,7 @@ function renderTrends() {
 // makes it the scroll container sticky positions against, which breaks the intended
 // viewport-relative stickiness. So instead we float a measured clone of the header over the
 // page once the real header scrolls above the fixed topbar+daybar, kept in horizontal sync.
-const FLOATHEAD_OFFSET = 100; // .topbar (55px) + .daybar (45px)
+const FLOATHEAD_OFFSET = 134; // .topbar (55px) + .daybar (45px) + .minibar (34px, when showing — see miniBarSync)
 function floatHeadSync() {
   if (!S._floatHeadBar) {
     const bar = document.createElement('div');
@@ -683,6 +698,33 @@ function floatHeadSync() {
     const wrapRect = wrap.getBoundingClientRect();
     bar.style.left = wrapRect.left + 'px'; bar.style.width = wrapRect.width + 'px';
     bar.scrollLeft = wrap.scrollLeft;
+    bar.classList.add('show');
+  } else bar.classList.remove('show');
+}
+
+// v22: a small sticky bar (race #, winner stars, top pick) while scrolling down a race page past its
+// banner — desktop/tablet only (<720px already has the bottom .pinbar from v18, so this would duplicate it).
+function miniBarSync() {
+  if (!S._miniBar) {
+    const bar = document.createElement('div');
+    bar.className = 'minibar';
+    document.body.appendChild(bar);
+    S._miniBar = bar;
+    const onScroll = () => miniBarSync();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+  }
+  const bar = S._miniBar;
+  const banner = document.querySelector('#raceTop .banner');
+  const r = banner && raceOf(curRace());
+  if (!banner || !r || !r.ranked.length || window.innerWidth < 720) { bar.classList.remove('show'); return; }
+  if (banner.getBoundingClientRect().bottom < 0) {
+    const srcKey = `${S.key}|${r.number}`;
+    if (bar.dataset.src !== srcKey) {
+      const h = r.ranked[0];
+      bar.innerHTML = `<b>R${r.number}</b> <span class="stars">${stars(r.confidence)}</span> <span class="mb-pick"><b>#${h.pgm}</b> ${esc(tc(h.name))}</span> <span class="mb-pct">${Math.round(h.win_prob * 100)}%</span>`;
+      bar.dataset.src = srcKey;
+    }
     bar.classList.add('show');
   } else bar.classList.remove('show');
 }
@@ -902,6 +944,7 @@ function renderCard() {
     <span class="note">${S.st.cond === 'off' ? 'Off-track records, sire off-track stats and the off-track post stats now count.' : 'Switch to Off if the track comes up wet — it re-ranks every race.'}</span></div>
   ${tonightHtml()}
   ${summaryCard()}
+  ${crossTrackRollup()}
   <div class="races">
     ${c.races.map((r) => {
       const rk = r.ranked;
@@ -946,6 +989,36 @@ function summaryCard() {
   </div></section>`;
 }
 
+// v22: when 2+ programs are loaded for tonight (the switcher bar), roll each one's best bets into one
+// view instead of clicking through each program's own Summary. Scores each other program by briefly
+// swapping it into the live S.* state (reusing cardHighlights()) and restoring exactly what was there.
+function crossTrackRollup() {
+  const today = dayCards();
+  if (today.length < 2) return '';
+  const save = { key: S.key, card: S.card, st: S.st, base: S.base, today: S.today, year: S.year,
+    driverTable: S.driverTable, book: S.book, bets: S.bets, noted: S._noted };
+  const rows = [];
+  for (const [key] of today) {
+    try {
+      if (key !== save.key) openCard(key, getCard(key));
+      const H = cardHighlights();
+      rows.push({ key, track: S.card.track, best: H.best.slice(0, 2), long: H.longs[0] || null });
+    } catch { /* a program that fails to re-score here just drops out of the rollup */ }
+  }
+  S.key = save.key; S.card = save.card; S.st = save.st; S.base = save.base; S.today = save.today; S.year = save.year;
+  S.driverTable = save.driverTable; S.book = save.book; S.bets = save.bets; S._noted = save.noted;
+  LS.set('hh:open', save.key);   // openCard() above persisted whichever key it last touched — put it back
+  if (rows.length < 2) return '';
+  const go = (key, n, html) => `<a href="#/race/${n}" data-switch="${esc(key)}" data-gohash="#/race/${n}">${html}</a>`;
+  return `<section class="panel summary" aria-label="Across tonight's tracks" style="margin-top:12px">
+    <div class="sum-head"><h2>Across tonight's tracks</h2><span class="note">${rows.length} programs loaded</span></div>
+    <div class="sgrid">${rows.map((x) => `<div class="sbox"><h3>${esc(x.track)}</h3>${x.best.length
+      ? `<ol>${x.best.map((r) => { const h = r.ranked[0]; return `<li>${go(x.key, r.number, `<b>R${r.number} #${h.pgm} ${esc(tc(h.name))}</b>`)} <span class="muted">ML ${esc(h.ml)} · ${r.confidence}/5</span></li>`; }).join('')}</ol>`
+      : '<p class="note">No races scored yet.</p>'}
+      ${x.long ? `<p class="note">Top longshot: ${go(x.key, x.long.r.number, `R${x.long.r.number} ${x.long.l.bet === 'ex' ? 'Ex' : 'Tri'} ${esc(x.long.l.text)}`)}</p>` : ''}</div>`).join('')}
+    </div></section>`;
+}
+
 // ---------------- render: race ----------------
 // one short, concrete reason the top pick is rated above a given rival
 function reasonOver(h, riv) {
@@ -970,7 +1043,7 @@ function whyHtml(r) {
   return `<b>Why #${h.pgm} ${esc(tc(h.name))}:</b> ${esc(pros)}. <b>Risk:</b> ${esc(risk)}. <b>Edge over #${h2.pgm}:</b> ${edge} (${gap.toFixed(1)} pts) — ${esc(reasonOver(h, h2))}.${over3} <b>Pace:</b> ${esc(pace)}.${moved}`;
 }
 
-const pcList = (items, cls) => `<ul class="${cls}">${items.length ? items.map(([t, imp]) => `<li class="${imp >= 3 ? 'b' : ''}">${esc(t)}</li>`).join('') : '<li class="faint none">—</li>'}</ul>`;
+const pcList = (items, cls) => `<ul class="${cls}">${items.length ? items.map(([t, imp, cat]) => `<li class="${imp >= 3 ? 'b' : imp === 2 ? 'm' : ''}">${cat ? `<span class="cat">${esc(cat)}</span>` : ''}${esc(t)}</li>`).join('') : '<li class="faint none">—</li>'}</ul>`;
 
 function statCells(h, hl) {
   const m = h.m, p = h.pgm, c = (k) => hlClass(hl, k, p);
@@ -1686,6 +1759,9 @@ function methodHtml() {
 function renderSettings() {
   return `<div class="cardhead"><div><h1>Settings</h1><div class="sub">Put more or less weight on what you trust. Every race re-ranks with your settings, and they stay in this browser — a friend's phone keeps their own. <span id="wbadge2">${weightsBadge()}</span></div></div>
     <div class="row"><button class="btn small" data-act="reset-weights">Back to normal</button></div></div>
+  <div class="panel" style="margin-top:12px"><h3>Look</h3>
+    <div class="row"><div class="seg" role="group" aria-label="Theme">${[['light', 'Light'], ['dark', 'Dark'], ['auto', 'Auto']].map(([v, l]) => `<button data-themeset="${v}" class="${(S.prefs.theme || 'auto') === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+    <p class="note">Auto follows your phone or computer's own light/dark setting — handy for checking picks at the track after dark.</p></div>
   ${tuneHtml()}
   <div class="panel" style="margin-top:12px"><h3>Share your settings</h3>
     <div class="row"><label class="note" for="shareName">Your name (optional, shown to whoever opens the link)</label></div>
@@ -2006,7 +2082,9 @@ function render() {
     view.innerHTML = sharedBanner() + html;
     if (navKey) nav.querySelector(`[data-nav="${navKey}"]`)?.classList.add('on');
     if (S._floatHeadBar) { S._floatHeadBar.classList.remove('show'); S._floatHeadBar.dataset.src = ''; }
+    if (S._miniBar) { S._miniBar.classList.remove('show'); S._miniBar.dataset.src = ''; }
     setTimeout(floatHeadSync, 0);
+    setTimeout(miniBarSync, 0);
   };
   if (route === 'settings') return show(renderSettings(), 'settings');
   if (route === 'record') return show(renderRecord(), 'record');
@@ -2032,7 +2110,7 @@ function renderRecent() {
 
 // ---------------- events ----------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn],[data-cbudget],[data-setplays],[data-switch],[data-tonight]');
+  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn],[data-cbudget],[data-setplays],[data-switch],[data-tonight],[data-blend],[data-rectab],[data-recplayed],[data-themeset]');
   if (!t) return;
   const act = t.dataset.act;
   if (act === 'use-link') {
@@ -2042,7 +2120,11 @@ document.addEventListener('click', (e) => {
     render(); window.scrollTo(0, 0); return;
   }
   if (act === 'open-data') { e.preventDefault(); DESK && DESK.invoke('open_folder', { folder: '' }).catch((x) => alert(String(x))); return; }
-  if (t.dataset.switch) { if (t.dataset.switch !== S.key) switchTo(t.dataset.switch); return; }
+  if (t.dataset.switch) {
+    if (t.dataset.gohash) switchTo(t.dataset.switch, t.dataset.gohash);
+    else if (t.dataset.switch !== S.key) switchTo(t.dataset.switch);
+    return;
+  }
   if (t.dataset.setplays) {
     const [name, v] = t.dataset.setplays.split('|'); const books = LS.get(TRACKS_KEY, {}); books[name] = { ...(books[name] || { cards: {} }), plays: v }; LS.set(TRACKS_KEY, books);
     if (S.key) rescoreAll(); render(); return;
@@ -2058,6 +2140,7 @@ document.addEventListener('click', (e) => {
   }
   if (act === 'live-clear') { if (S.st.live) delete S.st.live[+t.dataset.n]; saveState(); rescoreAll(); render(); return; }
   if (t.dataset.blend !== undefined) { S.prefs.mlBlend = +t.dataset.blend; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
+  if (t.dataset.themeset !== undefined) { S.prefs.theme = t.dataset.themeset; LS.set(PREF_KEY, S.prefs); applyTheme(); render(); return; }
   if (act === 'learn-use') { S.prefs.learnUse = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
   if (act === 'learn-freeze') { S.prefs.learnFreeze = t.checked; LS.set(PREF_KEY, S.prefs); render(); return; }
   if (act === 'learn-now') { runLearning(); return; }
@@ -2310,6 +2393,7 @@ function applyMult(m) {
   }
   S.mult = { ...DEFAULT_MULT, ...LS.get(MULT_KEY, {}) };
   S.prefs = { ...S.prefs, ...LS.get(PREF_KEY, {}) };
+  applyTheme();
   readSharedFromUrl();
   pruneCards();
   S.learned = LS.get(LEARN_KEY, null);

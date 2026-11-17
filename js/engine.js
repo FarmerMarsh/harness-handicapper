@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=21';
+import { fmtTime } from './parse.js?v=22';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -977,6 +977,14 @@ function rankOf(h, hs, key, higherBetter = true) {
   return [vals.filter((x) => (higherBetter ? x > v : x < v)).length + 1, vals.length];
 }
 
+// name the specific rival(s) a pro/con is being measured against, e.g. "behind #4 and #7"
+function rivalNames(h, hs, key, higherBetter = true, n = 2) {
+  return hs.filter((x) => x !== h && x.m[key] != null)
+    .sort((a, b) => (higherBetter ? b.m[key] - a.m[key] : a.m[key] - b.m[key]))
+    .slice(0, n).map((x) => '#' + x.pgm);
+}
+const joinAnd = (arr) => (arr.length <= 1 ? arr[0] || '' : arr.slice(0, -1).join(', ') + ' and ' + arr[arr.length - 1]);
+
 function lengths(x) {
   if (x == null) return '';
   const w = Math.trunc(x), f = x - w;
@@ -995,153 +1003,156 @@ const money = (x) => '$' + x.toLocaleString('en-US');
 
 function prosCons(h, hs, race, year) {
   const m = h.m, pros = [], cons = [];
-  const P = (t, imp) => pros.push([t, imp]);
-  const C = (t, imp) => cons.push([t, imp]);
+  const P = (t, imp, cat) => pros.push([t, imp, cat]);
+  const C = (t, imp, cat) => cons.push([t, imp, cat]);
   let [r, k] = rankOf(h, hs, 'sr_avg');
-  if (r === 1) P(`Top speed figures in field (avg SR ${f0(m.sr_avg)})`, 3);
-  else if (r === 2) P(`2nd-best speed figures (avg SR ${f0(m.sr_avg)})`, 2);
-  else if (r && r >= k - 1 && k >= 4) C(`Speed figures near the bottom (avg SR ${f0(m.sr_avg)})`, 2);
+  if (r === 1) P(`Top speed figures in field (avg SR ${f0(m.sr_avg)})`, 3, 'Speed');
+  else if (r === 2) P(`2nd-best speed figures (avg SR ${f0(m.sr_avg)}) — behind ${joinAnd(rivalNames(h, hs, 'sr_avg', true, 1))}`, 2, 'Speed');
+  else if (r && r >= k - 1 && k >= 4) C(`Speed figures near the bottom (avg SR ${f0(m.sr_avg)}) — behind ${joinAnd(rivalNames(h, hs, 'sr_avg', true, 2))}`, 2, 'Speed');
   [r, k] = rankOf(h, hs, 'avg_mark', false);
-  if (r === 1) P(`Fastest avg mile in field (${fmtTime(m.avg_mark)} adj)`, 3);
+  if (r === 1) P(`Fastest avg mile in field (${fmtTime(m.avg_mark)} adj)`, 3, 'Speed');
   [r, k] = rankOf(h, hs, 'close_q', false);
-  if (r === 1) P(`Best closer: last 1/4 avg ${m.close_q.toFixed(1)} (best ${m.close_best.toFixed(1)})`, 3);
-  else if (r === 2) P(`Strong closer: last 1/4 avg ${m.close_q.toFixed(1)}`, 2);
-  else if (r && r === k && k >= 4) C(`Weakest finisher: last 1/4 avg ${m.close_q.toFixed(1)}`, 3);
+  if (r === 1) P(`Best closer: last 1/4 avg ${m.close_q.toFixed(1)} (best ${m.close_best.toFixed(1)})`, 3, 'Trip/Post');
+  else if (r === 2) P(`Strong closer: last 1/4 avg ${m.close_q.toFixed(1)} — behind only ${joinAnd(rivalNames(h, hs, 'close_q', false, 1))}`, 2, 'Trip/Post');
+  else if (r && r === k && k >= 4) C(`Weakest finisher: last 1/4 avg ${m.close_q.toFixed(1)} — behind ${joinAnd(rivalNames(h, hs, 'close_q', false, 2))}`, 3, 'Trip/Post');
   if (m.open_pos != null) {
     const oq = m.open_q != null ? ` (opens in ${m.open_q.toFixed(1)})` : '';
-    if (m.leave_n >= 2 && m.leave_t != null && m.leave_t >= 0.5) P(`Gate speed: 1st–3rd at the 1/4 in ${m.leave_hits} of last ${m.leave_n}${oq}`, m.leave_t >= 0.8 ? 3 : 2);
-    else if (m.leave_n >= 2 && m.leave >= 0.6 && m.leave_t < 0.5) C(`Leaver stuck with ${m.second_tier ? 'the second tier' : 'post ' + m.post_no} — hard to make the front tonight`, 2);
-    else if (m.open_pos <= 2.0) P(`Gate speed: avg ${m.open_pos.toFixed(1)} at the 1/4${oq}`, 2);
-    else if (m.open_pos >= 6) C(`Opens slow: avg ${m.open_pos.toFixed(1)} at the 1/4${m.open_q != null ? ` (opens in ${m.open_q.toFixed(1)})` : ''}`, 2);
+    if (m.leave_n >= 2 && m.leave_t != null && m.leave_t >= 0.5) P(`Gate speed: 1st–3rd at the 1/4 in ${m.leave_hits} of last ${m.leave_n}${oq}`, m.leave_t >= 0.8 ? 3 : 2, 'Trip/Post');
+    else if (m.leave_n >= 2 && m.leave >= 0.6 && m.leave_t < 0.5) C(`Leaver stuck with ${m.second_tier ? 'the second tier' : 'post ' + m.post_no} — hard to make the front tonight`, 2, 'Trip/Post');
+    else if (m.open_pos <= 2.0) P(`Gate speed: avg ${m.open_pos.toFixed(1)} at the 1/4${oq}`, 2, 'Trip/Post');
+    else if (m.open_pos >= 6) C(`Opens slow: avg ${m.open_pos.toFixed(1)} at the 1/4${oq} — behind ${joinAnd(rivalNames(h, hs, 'open_pos', false, 2))}`, 2, 'Trip/Post');
   }
   const fins = m.fins3.join('-');
-  if (m.won_last) P(`Won last start (last 3: ${fins})`, 3);
-  else if (m.avg_fin3 != null && m.avg_fin3 <= 2.5) P(`Sharp form: ${fins} last 3`, 2);
-  else if (m.fins3.includes(1)) P(`Recent win (last 3: ${fins})`, 2);
-  else if (m.fins3.length >= 3 && Math.max(...m.fins3) <= 4) P(`Consistent: top 4 in each of last 3 (${fins})`, 2);
-  else if (m.avg_fin3 != null && m.avg_fin3 >= 6) C(`Poor recent form: ${fins} last 3`, 2);
-  else if (m.avg_fin3 != null && m.avg_fin3 >= 4 && !m.fins3.includes(1)) C(`No win in last 3 (${fins})`, 1);
+  if (m.won_last) P(`Won last start (last 3: ${fins})`, 3, 'Form');
+  else if (m.avg_fin3 != null && m.avg_fin3 <= 2.5) P(`Sharp form: ${fins} last 3`, 2, 'Form');
+  else if (m.fins3.includes(1)) P(`Recent win (last 3: ${fins})`, 2, 'Form');
+  else if (m.fins3.length >= 3 && Math.max(...m.fins3) <= 4) P(`Consistent: top 4 in each of last 3 (${fins})`, 2, 'Form');
+  else if (m.avg_fin3 != null && m.avg_fin3 >= 6) C(`Poor recent form: ${fins} last 3`, 2, 'Form');
+  else if (m.avg_fin3 != null && m.avg_fin3 >= 4 && !m.fins3.includes(1)) C(`No win in last 3 (${fins})`, 1, 'Form');
   const cr = m.class_ratio;
   if (m.ship) {
     const nm = TRACK_NAME[trackKey(m.last_track)] || trackKey(m.last_track);
-    if (m.tier_diff > 0) P(`Ships in from a tougher circuit (${nm})`, 2);
-    else if (m.tier_diff < 0) C(`Ships in from a weaker circuit (${nm})`, m.tier_diff === -1 ? 2 : 3);
+    if (m.tier_diff > 0) P(`Ships in from a tougher circuit (${nm})`, 2, 'Class');
+    else if (m.tier_diff < 0) C(`Ships in from a weaker circuit (${nm})`, m.tier_diff === -1 ? 2 : 3, 'Class');
   } else if (cr != null) {
-    if (cr <= 0.85) P(`Class drop: ${money(m.last_purse)} → ${money(race.purse)}`, cr <= 0.7 ? 3 : 2);
-    else if (cr >= 1.18) C(`Class rise: ${money(m.last_purse)} → ${money(race.purse)}`, cr >= 1.5 ? 3 : 2);
+    if (cr <= 0.85) P(`Class drop: ${money(m.last_purse)} → ${money(race.purse)}`, cr <= 0.7 ? 3 : 2, 'Class');
+    else if (cr >= 1.18) C(`Class rise: ${money(m.last_purse)} → ${money(race.purse)}`, cr >= 1.5 ? 3 : 2, 'Class');
   }
   const cd = m.cr_diff;
   if (cd != null) {
-    if (cd >= 3) P(`Has faced tougher: avg class rating ${f0(m.cr_avg3)} vs ${race.cr} today`, cd >= 6 ? 3 : 2);
-    else if (cd <= -4) C(`Faced softer: avg class rating ${f0(m.cr_avg3)} vs ${race.cr} today`, cd <= -8 ? 3 : 2);
+    if (cd >= 3) P(`Has faced tougher: avg class rating ${f0(m.cr_avg3)} vs ${race.cr} today`, cd >= 6 ? 3 : 2, 'Class');
+    else if (cd <= -4) C(`Faced softer: avg class rating ${f0(m.cr_avg3)} vs ${race.cr} today`, cd <= -8 ? 3 : 2, 'Class');
   }
   const tags = Object.fromEntries(m.adj);
-  if ('lone_speed' in tags) P('Lone speed: only true early horse in the field', 3);
-  if ('speed_duel' in tags) C(`Speed duel likely with ${race.pace.early.filter((x) => x !== h.pgm).map((x) => '#' + x).join(', ')}`, 2);
-  if ('closer_setup' in tags) P('Hot pace up front sets up his late kick', 2);
+  if ('lone_speed' in tags) P('Lone speed: only true early horse in the field', 3, 'Trip/Post');
+  if ('speed_duel' in tags) C(`Speed duel likely with ${race.pace.early.filter((x) => x !== h.pgm).map((x) => '#' + x).join(', ')}`, 2, 'Trip/Post');
+  if ('closer_setup' in tags) P('Hot pace up front sets up his late kick', 2, 'Trip/Post');
   const tp = race.trip;
   if (tp && !('lone_speed' in tags)) {
-    if (m.trip_role === 'leader' && tp.shape !== 'contested' && tp.shape !== 'soft') P('Projected leader — should make the front', 2);
-    else if (m.trip_role === 'pocket' && tp.leader) P(`Projected pocket trip behind #${tp.leader}`, 2);
-    else if (m.trip_role === 'first-over' && h.rank <= 4 && race.track_size != null && race.track_size <= 0.625) C('Likely has to come first-over — the hard trip', 1);
+    if (m.trip_role === 'leader' && tp.shape !== 'contested' && tp.shape !== 'soft') P('Projected leader — should make the front', 2, 'Trip/Post');
+    else if (m.trip_role === 'pocket' && tp.leader) P(`Projected pocket trip behind #${tp.leader}`, 2, 'Trip/Post');
+    else if (m.trip_role === 'first-over' && h.rank <= 4 && race.track_size != null && race.track_size <= 0.625) C('Likely has to come first-over — the hard trip', 1, 'Trip/Post');
   }
   const dc = m.drv_change;
   if (dc) {
     const prev = dc.prev.split(',')[0];
     const d = dc.delta;
-    if (d != null && d >= 0.05) P(`Driver upgrade: ${shortName(h.driver)} (UDR ${m.driver_udr.toFixed(3)}) for ${prev} (${dc.prev_udr.toFixed(3)})`, d >= 0.10 ? 3 : 2);
-    else if (d != null && d <= -0.05) C(`Driver downgrade: ${shortName(h.driver)} (${m.driver_udr.toFixed(3)}) for ${prev} (${dc.prev_udr.toFixed(3)})`, 2);
-    else if (d == null && 'driver_up' in tags) P(`Picks up top driver ${shortName(h.driver)} (UDR ${m.driver_udr.toFixed(3)}, was ${prev})`, 2);
+    if (d != null && d >= 0.05) P(`Driver upgrade: ${shortName(h.driver)} (UDR ${m.driver_udr.toFixed(3)}) for ${prev} (${dc.prev_udr.toFixed(3)})`, d >= 0.10 ? 3 : 2, 'Connections');
+    else if (d != null && d <= -0.05) C(`Driver downgrade: ${shortName(h.driver)} (${m.driver_udr.toFixed(3)}) for ${prev} (${dc.prev_udr.toFixed(3)})`, 2, 'Connections');
+    else if (d == null && 'driver_up' in tags) P(`Picks up top driver ${shortName(h.driver)} (UDR ${m.driver_udr.toFixed(3)}, was ${prev})`, 2, 'Connections');
   }
   if (h.drv_changed && h._d0) {
     const d = (h.drv_udr ?? 0.2) - (h._d0.drv_udr ?? 0.2);
     const txt = `Late driver change: ${shortName(h.driver)} for ${shortName(h._d0.driver)}`;
-    if (d >= 0.03) P(txt + ' — an upgrade', d >= 0.08 ? 3 : 2); else if (d <= -0.03) C(txt + ' — a downgrade', d <= -0.08 ? 3 : 2); else C(txt, 1);
+    if (d >= 0.03) P(txt + ' — an upgrade', d >= 0.08 ? 3 : 2, 'Connections'); else if (d <= -0.03) C(txt + ' — a downgrade', d <= -0.08 ? 3 : 2, 'Connections'); else C(txt, 1, 'Connections');
   }
   if (m.tough.length) {
     const t = m.tough[0];
     const how = t.finish === 1 ? 'won' : `finished ${t.finish}` + (t.beaten ? `, beaten ${lengths(t.beaten)}` : '');
-    P(`Tough-trip credit: parked/first-over ${t.date.slice(0, 5)} and still ${how}`, t.finish === 1 ? 3 : 2);
+    P(`Tough-trip credit: parked/first-over ${t.date.slice(0, 5)} and still ${how}`, t.finish === 1 ? 3 : 2, 'Trip/Post');
   }
   if (race.gait === 'TROT') {
-    if (m.brk_l10 >= 2) C(`Breaker: broke in ${m.brk_l10} of last ${m.lines_n}${m.brk_last ? ', including last start' : ''}`, 3);
-    else if (m.brk_l10 === 1) C(`Broke stride in 1 of last ${m.lines_n}${m.brk_last ? ' (last start)' : ''}`, m.brk_last ? 3 : 2);
-    else if (m.lines_n >= 6) P(`Clean-gaited: no breaks in last ${m.lines_n}`, 2);
-  } else if (m.brk_l5 >= 2) C(`Broke in ${m.brk_l5} of last 5`, 3);
-  else if (m.brk_l5 === 1) C('Broke stride in 1 of last 5', 1);
+    if (m.brk_l10 >= 2) C(`Breaker: broke in ${m.brk_l10} of last ${m.lines_n}${m.brk_last ? ', including last start' : ''}`, 3, 'Form');
+    else if (m.brk_l10 === 1) C(`Broke stride in 1 of last ${m.lines_n}${m.brk_last ? ' (last start)' : ''}`, m.brk_last ? 3 : 2, 'Form');
+    else if (m.lines_n >= 6) P(`Clean-gaited: no breaks in last ${m.lines_n}`, 2, 'Form');
+  } else if (m.brk_l5 >= 2) C(`Broke in ${m.brk_l5} of last 5`, 3, 'Form');
+  else if (m.brk_l5 === 1) C('Broke stride in 1 of last 5', 1, 'Form');
   // speed trend
   if (m.sr_trend != null) {
     const seq = m.sr_seq.join(' → ');
-    if (m.sr_trend >= 2.5) P(`Improving: speed figures ${seq}`, m.sr_trend >= 4 ? 3 : 2);
-    else if (m.sr_trend <= -2.5) C(`Declining: speed figures ${seq}`, m.sr_trend <= -4 ? 3 : 2);
+    if (m.sr_trend >= 2.5) P(`Improving: speed figures ${seq}`, m.sr_trend >= 4 ? 3 : 2, 'Speed');
+    else if (m.sr_trend <= -2.5) C(`Declining: speed figures ${seq}`, m.sr_trend <= -4 ? 3 : 2, 'Speed');
   }
   // hot / cold connections (last 30 days vs the year)
   if (m.drv_hot != null && m.drv30_st >= 15) {
-    if (m.drv_hot >= 0.06) P(`Hot driver: UDR ${h.drv30.r.toFixed(3)} last 30 days (year ${h.drv_udr.toFixed(3)})`, m.drv_hot >= 0.1 ? 3 : 2);
-    else if (m.drv_hot <= -0.06) C(`Cold driver: UDR ${h.drv30.r.toFixed(3)} last 30 days (year ${h.drv_udr.toFixed(3)})`, m.drv_hot <= -0.1 ? 3 : 2);
+    if (m.drv_hot >= 0.06) P(`Hot driver: UDR ${h.drv30.r.toFixed(3)} last 30 days (year ${h.drv_udr.toFixed(3)})`, m.drv_hot >= 0.1 ? 3 : 2, 'Connections');
+    else if (m.drv_hot <= -0.06) C(`Cold driver: UDR ${h.drv30.r.toFixed(3)} last 30 days (year ${h.drv_udr.toFixed(3)})`, m.drv_hot <= -0.1 ? 3 : 2, 'Connections');
   }
   if (m.trn_hot != null && m.trn30_st >= 6) {
-    if (m.trn_hot >= 0.08) P(`Hot barn: UTR ${h.trn30.r.toFixed(3)} last 30 days (year ${h.trn_utr.toFixed(3)})`, m.trn_hot >= 0.15 ? 3 : 2);
-    else if (m.trn_hot <= -0.08) C(`Cold barn: UTR ${h.trn30.r.toFixed(3)} last 30 days (year ${h.trn_utr.toFixed(3)})`, m.trn_hot <= -0.15 ? 3 : 2);
+    if (m.trn_hot >= 0.08) P(`Hot barn: UTR ${h.trn30.r.toFixed(3)} last 30 days (year ${h.trn_utr.toFixed(3)})`, m.trn_hot >= 0.15 ? 3 : 2, 'Connections');
+    else if (m.trn_hot <= -0.08) C(`Cold barn: UTR ${h.trn30.r.toFixed(3)} last 30 days (year ${h.trn_utr.toFixed(3)})`, m.trn_hot <= -0.15 ? 3 : 2, 'Connections');
   }
   // connections & course
   if (m.combo && m.combo.st >= 5) {
-    if (m.combo.w >= 25 && m.combo.w >= (h.drv_w || 0) + 8) P(`Driver/trainer team wins ${m.combo.w}% together (${m.combo.st} starts)`, 2);
-    else if (m.combo.st >= 10 && m.combo.w <= 5) C(`Driver/trainer team ${m.combo.w}% together (${m.combo.st} starts)`, 1);
+    if (m.combo.w >= 25 && m.combo.w >= (h.drv_w || 0) + 8) P(`Driver/trainer team wins ${m.combo.w}% together (${m.combo.st} starts)`, 2, 'Connections');
+    else if (m.combo.st >= 10 && m.combo.w <= 5) C(`Driver/trainer team ${m.combo.w}% together (${m.combo.st} starts)`, 1, 'Connections');
   }
   if (m.course && m.course.starts >= 4) {
-    if (m.course.t3 >= 50 && m.course.t3 >= (m.life_top3 || 0) + 10) P(`Likes this track: ${m.course.starts} starts ${m.course.wins}-${m.course.places}-${m.course.shows} here`, 2);
-    else if (m.course.starts >= 6 && m.course.t3 <= 20) C(`Poor record here: ${m.course.starts} starts ${m.course.wins}-${m.course.places}-${m.course.shows}`, 2);
+    if (m.course.t3 >= 50 && m.course.t3 >= (m.life_top3 || 0) + 10) P(`Likes this track: ${m.course.starts} starts ${m.course.wins}-${m.course.places}-${m.course.shows} here`, 2, 'Trip/Post');
+    else if (m.course.starts >= 6 && m.course.t3 <= 20) C(`Poor record here: ${m.course.starts} starts ${m.course.wins}-${m.course.places}-${m.course.shows}`, 2, 'Trip/Post');
   }
   if (m.new_barn) {
     const nb = m.new_barn, which = nb.starts_since === 0 ? 'First' : 'Second';
-    if (nb.d >= 0.05) P(`${which} start for a better barn (UTR ${nb.prev_utr.toFixed(3)} → ${h.trn_utr.toFixed(3)})`, nb.d >= 0.1 ? 3 : 2);
-    else if (nb.d <= -0.05) C(`${which} start for a weaker barn (UTR ${nb.prev_utr.toFixed(3)} → ${h.trn_utr.toFixed(3)})`, 2);
+    if (nb.d >= 0.05) P(`${which} start for a better barn (UTR ${nb.prev_utr.toFixed(3)} → ${h.trn_utr.toFixed(3)})`, nb.d >= 0.1 ? 3 : 2, 'Connections');
+    else if (nb.d <= -0.05) C(`${which} start for a weaker barn (UTR ${nb.prev_utr.toFixed(3)} → ${h.trn_utr.toFixed(3)})`, 2, 'Connections');
   }
   // off-track ability, only when the track is off
   if (race.cond === 'off' && m.off_rec) {
     const o = m.off_rec;
-    if (o.starts >= 3 && m.off_t3 >= 50) P(`Handles off tracks: ${o.starts} starts ${o.wins}-${o.places}-${o.shows}`, 3);
-    else if (o.starts >= 3 && m.off_t3 <= 15) C(`Struggles on off tracks: ${o.starts} starts ${o.wins}-${o.places}-${o.shows}`, 3);
-    if (h.sire_off && h.sire_off.st >= 100 && h.sire_off.w >= 17) P(`Sire's foals win ${h.sire_off.w}% on off tracks`, 1);
+    if (o.starts >= 3 && m.off_t3 >= 50) P(`Handles off tracks: ${o.starts} starts ${o.wins}-${o.places}-${o.shows}`, 3, 'Trip/Post');
+    else if (o.starts >= 3 && m.off_t3 <= 15) C(`Struggles on off tracks: ${o.starts} starts ${o.wins}-${o.places}-${o.shows}`, 3, 'Trip/Post');
+    if (h.sire_off && h.sire_off.st >= 100 && h.sire_off.w >= 17) P(`Sire's foals win ${h.sire_off.w}% on off tracks`, 1, 'Trip/Post');
   }
-  if (m.days_real != null && m.days_real > 45) C(`Off ${m.days_real} days since last race${m.qual_since ? ' (qualified since)' : ''}`, m.qual_since ? 2 : 3);
-  if (m.clean_n <= 1) C(`Only ${m.clean_n} clean line(s) in last 5 — little to go on`, 2);
+  if (m.days_real != null && m.days_real > 45) C(`Off ${m.days_real} days since last race${m.qual_since ? ' (qualified since)' : ''}`, m.qual_since ? 2 : 3, 'Form');
+  if (m.clean_n <= 1) C(`Only ${m.clean_n} clean line(s) in last 5 — little to go on`, 2, 'Form');
   const ys = m.yr_starts, yw = m.yr_wins;
-  if (ys >= 10 && (m.yr_win || 0) < 6) C(`${yw} win${yw !== 1 ? 's' : ''} from ${ys} starts in ${year}`, 2);
-  else if (ys >= 6 && (m.yr_win || 0) >= 25) P(`${yw} wins from ${ys} starts in ${year} (${f0(m.yr_win)}%)`, 2);
+  if (ys >= 10 && (m.yr_win || 0) < 6) C(`${yw} win${yw !== 1 ? 's' : ''} from ${ys} starts in ${year}`, 2, 'Class');
+  else if (ys >= 6 && (m.yr_win || 0) >= 25) P(`${yw} wins from ${ys} starts in ${year} (${f0(m.yr_win)}%)`, 2, 'Class');
   const upgraded = !!(m.drv_change && m.adj.some(([k]) => k.startsWith('driver_up')));
   if (m.driver_udr != null) {
-    if (m.driver_udr >= 0.300 && !upgraded) P(`Top driver ${h.driver} (UDR ${m.driver_udr.toFixed(3)})`, 2);
-    else if (m.driver_udr < 0.160) C(`Low-percentage driver (UDR ${m.driver_udr.toFixed(3)})`, 1);
+    if (m.driver_udr >= 0.300 && !upgraded) P(`Top driver ${h.driver} (UDR ${m.driver_udr.toFixed(3)})`, 2, 'Connections');
+    else if (m.driver_udr < 0.160) {
+      const best = rivalNames(h, hs, 'driver_udr', true, 1);
+      C(`Low-percentage driver (UDR ${m.driver_udr.toFixed(3)})${best.length ? ` — ${best[0]} is the sharpest in this field` : ''}`, 1, 'Connections');
+    }
   }
   if (h.trn_w != null && m.trn_hot == null && (h.trn_st == null || h.trn_st >= 15)) {
     const st = h.trn_st != null ? ` (${h.trn_st} starts)` : '';
-    if (h.trn_w >= 20) P(`Strong barn: trainer wins ${h.trn_w}%${st}`, 1);
-    else if (h.trn_w <= 5) C(`Weak barn: trainer wins ${h.trn_w}%${st}`, 1);
+    if (h.trn_w >= 20) P(`Strong barn: trainer wins ${h.trn_w}%${st}`, 1, 'Connections');
+    else if (h.trn_w <= 5) C(`Weak barn: trainer wins ${h.trn_w}%${st}`, 1, 'Connections');
   }
   const prt = m.post_idx != null ? Math.round(m.post_idx) : null;
   if (prt != null) {
     const pn = h.post_no ?? h.pgm;
     const trkTxt = race.track_size === 0.5 ? ' on a half-mile track' : race.track_size === 0.625 ? ' on a ⅝ track' : '';
     const src = m.post_src || 'post index';
-    if (prt >= 20) P(`Good post: PP${pn} (${src} +${prt})${trkTxt}`, prt >= 40 ? 3 : 2);
-    else if (prt <= -20) C(`Tough post: PP${pn} (${src} ${prt})${trkTxt}`, prt <= -40 ? 3 : 2);
+    if (prt >= 20) P(`Good post: PP${pn} (${src} +${prt})${trkTxt}`, prt >= 40 ? 3 : 2, 'Trip/Post');
+    else if (prt <= -20) C(`Tough post: PP${pn} (${src} ${prt})${trkTxt}`, prt <= -40 ? 3 : 2, 'Trip/Post');
   }
   if (m.sizefit != null && m.size_here_n >= 2 && SIZE_LABEL[race.track_size]) {
     const d = Math.round(m.sizefit), lab = SIZE_LABEL[race.track_size];
-    if (d >= 4) P(`Better on ${lab} tracks: speed figures +${d} vs his other tracks`, d >= 7 ? 2 : 1);
-    else if (d <= -4) C(`Not as good on ${lab} tracks: speed figures ${d} vs his other tracks`, d <= -7 ? 2 : 1);
+    if (d >= 4) P(`Better on ${lab} tracks: speed figures +${d} vs his other tracks`, d >= 7 ? 2 : 1, 'Trip/Post');
+    else if (d <= -4) C(`Not as good on ${lab} tracks: speed figures ${d} vs his other tracks`, d <= -7 ? 2 : 1, 'Trip/Post');
   } else if (m.sizefit == null && m.size_there_n >= 3 && m.size_here_n === 0 && SIZE_LABEL[race.track_size] && (h.age || 0) >= 6) {
-    C(`First try on a ${SIZE_LABEL[race.track_size]} track lately (age ${h.age})`, 1);
+    C(`First try on a ${SIZE_LABEL[race.track_size]} track lately (age ${h.age})`, 1, 'Trip/Post');
   }
   const lg = m.late_gain;
   if (lg != null && m.late_pairs.length >= 2) {
     [r] = rankOf(h, hs, 'late_gain');
-    if (lg >= 1.5) P(`Gains late: +${lg.toFixed(1)} spots from 3/4 to finish`, r === 1 && lg >= 2 ? 3 : 2);
-    else if (lg <= -1.5) C(`Fades late: ${lg.toFixed(1)} spots from 3/4 to finish`, lg <= -2.5 ? 3 : 2);
+    if (lg >= 1.5) P(`Gains late: +${lg.toFixed(1)} spots from 3/4 to finish`, r === 1 && lg >= 2 ? 3 : 2, 'Trip/Post');
+    else if (lg <= -1.5) C(`Fades late: ${lg.toFixed(1)} spots from 3/4 to finish`, lg <= -2.5 ? 3 : 2, 'Trip/Post');
   }
-  if (h.equip_note) P(h.equip_note.charAt(0) + h.equip_note.slice(1).toLowerCase().replace('lasix', 'Lasix'), 1);
+  if (h.equip_note) P(h.equip_note.charAt(0) + h.equip_note.slice(1).toLowerCase().replace('lasix', 'Lasix'), 1, 'Form');
   pros.sort((a, b) => b[1] - a[1]); cons.sort((a, b) => b[1] - a[1]);
   return [pros.slice(0, 4), cons.slice(0, 4)];
 }
