@@ -7,7 +7,7 @@
 // out our lines are (temperature) so a horse we call 20% wins about 20% of the time.
 // Every fit is checked on races it didn't see (5 groups of cards); if it doesn't beat normal weights
 // there, normal weights stay in use.
-import { DEFAULT_WEIGHTS, BASE_SUM, TEMP, FACTORS } from './engine.js?v=18';
+import { DEFAULT_WEIGHTS, BASE_SUM, TEMP, FACTORS } from './engine.js?v=19';
 
 const WKEYS = Object.keys(DEFAULT_WEIGHTS);
 export const LEARN_KEYS = FACTORS.map((f) => f.key).filter((k) => k !== 'offtrack');

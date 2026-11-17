@@ -1,11 +1,11 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=18';
+import { parseProgram, fmtTime } from './parse.js?v=19';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=18';
-import { learnAll, learnedMult } from './learn.js?v=18';
+} from './engine.js?v=19';
+import { learnAll, learnedMult } from './learn.js?v=19';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -334,7 +334,7 @@ function openCard(key, card) {
   S.key = key;
   LS.set('hh:open', key);
   S.base = JSON.stringify(card);
-  S.st = { scratches: {}, notes: {}, results: {}, snaps: {}, picks: {}, ...LS.get(stateKey(key), {}) };
+  S.st = { scratches: {}, notes: {}, results: {}, snaps: {}, picks: {}, pay: {}, played: {}, drivers: {}, live: {}, ...LS.get(stateKey(key), {}) };
   S.st.picks = S.st.picks || {};
   rescoreAll();
 }
@@ -430,7 +430,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=18', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=19', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -651,7 +651,7 @@ function oldPlayHit(kindName, play, top, fin) {
   if (t === 'KEY') return fin[0] === top[0] && sub(fin.slice(1, 4), top.slice(1, 5));
   return sub(fin.slice(0, 4), top.slice(0, 4));
 }
-const PAYK = { exacta: 'ex', trifecta: 'tri', superfecta: 'sup' }, PER_DEF = { ex: 2, tri: 0.5, sup: 0.2 };
+const PAYK = { exacta: 'ex', trifecta: 'tri', superfecta: 'sup' }, PER_DEF = { ex: 1, tri: 0.5, sup: 0.2 };
 function gradeRace(snap, fin, pay = null, played = null) {
   const o = snap.order;
   const row = { conf: snap.conf, under: snap.under, win: fin[0] === o[0], itm: fin.slice(0, 3).includes(o[0]) };
@@ -1073,7 +1073,9 @@ function ticketFor(b, budget = budgetNow()) {
   const fins = legs.map((l) => (S.st.results[l.n] || [])[0]);
   const graded = fins.every(Boolean) ? legs.every((l, i) => l.sel.includes(+fins[i])) : null;
   const edited = Object.keys(fixed).length > 0;
-  return { ...t, b, legs, base, budget, graded, edited, over: t.cost > HARD_CAP + 1e-9 };
+  const pay = ps.pay, per = ps.per || b.base;
+  const ret = graded == null ? null : !graded ? 0 : pay == null ? null : (pay * (t.cost / t.combos)) / per;
+  return { ...t, b, legs, base, budget, graded, edited, over: t.cost > HARD_CAP + 1e-9, pay, per, ret, played: !!ps.played };
 }
 // The suggestion for the card: the $5 ticket, or the $10 version when only the bigger one is worth playing.
 function pickPlan(b) {
@@ -1100,8 +1102,10 @@ function renderPicks() {
     return `<div class="panel ticket ${t.verdict === 'PLAY' ? 'play' : ''}">
       <div class="t-head"><h3>${verdictPill(t)} ${esc(b.name)} · Races ${b.races[0]}–${b.races[b.races.length - 1]}</h3>
         <div class="t-sum"><b>${ticketLine(t)}</b><br>${t.combos} combo${t.combos > 1 ? 's' : ''} × <select data-pbase="${b.id}" aria-label="Base bet">${[0.1, 0.2, 0.5, 1, 2].map((x) => `<option value="${x}" ${x === t.base ? 'selected' : ''}>${baseLabel(x)}</option>`).join('')}</select> = <b class="${t.over ? 'no' : ''}">${dollars(t.cost)}</b> · model hit ~${pctP(t.hit, t.hit < 0.1 ? 1 : 0)}
-        ${t.graded == null ? '' : t.graded ? ' · <span class="ok">HIT</span>' : ' · <span class="no">missed</span>'}</div></div>
+        ${t.graded == null ? '' : t.graded ? ` · <span class="ok">HIT${t.pay != null ? ` ${dollars(t.ret)}` : ''}</span>` : ' · <span class="no">missed</span>'}</div></div>
       <div class="why-line">${t.verdict === 'PLAY' ? 'Play' : 'Pass'}: ${esc(t.why)}.${t.over ? ' <b class="no">Over your $10 limit — drop a horse.</b>' : ''}</div>
+      <div class="row tpay"><label class="plchk"><input type="checkbox" data-tplayed="${b.id}" ${t.played ? 'checked' : ''}> played</label>
+        ${t.graded != null ? `<span>Payout <span class="payin">$<input data-tpay="${b.id}" inputmode="decimal" autocomplete="off" value="${t.pay != null ? t.pay.toFixed(2) : ''}" placeholder="—"><select data-tper="${b.id}">${[2, 1, 0.5, 0.2, 0.1].map((v) => `<option value="${v}" ${t.per === v ? 'selected' : ''}>per ${baseLabel(v)}</option>`).join('')}</select></span></span>` : ''}</div>
       ${alt ? `<div class="alt">At $10 it's a play: <b>${ticketLine(alt)}</b> — ${alt.combos} combos = ${dollars(alt.cost)}, model hit ~${pctP(alt.hit, 1)} (${esc(alt.why)}).</div>` : ''}
       ${t.legs.map((l) => `<div class="leg"><div class="leg-h"><a href="#/race/${l.n}"><b>R${l.n}</b></a> <span class="stars">${stars(l.r.confidence)}</span> <span class="muted">${l.sel.length === 1 ? 'single' : l.sel.length + ' horses'} · covers ${Math.round(l.cover * 100)}%${l.custom ? ' · locked by you' : ''}</span></div>
         <div class="chips">${l.r.ranked.map((h) => `<button class="chip ${l.sel.includes(h.pgm) ? 'on' : ''} ${h.value === 'good' ? 'gvc' : ''}" data-pick="${b.id}|${l.n}|${h.pgm}" aria-pressed="${l.sel.includes(h.pgm)}">#${h.pgm} <small>${Math.round(h.win_prob * 100)}% · ${esc(h.ml)}</small></button>`).join('')}</div></div>`).join('')}
@@ -1130,7 +1134,7 @@ function parseResults(text, card) {
     if (v) out[+m[1]] = { order: v, how: 'typed order' };
   }
   // race blocks
-  const marks = [...clean.matchAll(/(?:^|\n|\s)(?:race|r)\s*#?\s*(\d{1,2})\b|(?:^|\n)\s*(\d{1,2})(?:st|nd|rd|th)\s+race\b/gi)];
+  const marks = [...clean.matchAll(/(?:^|\n|\s)(?:race|r)\s*#?\s*[:.]?\s*(\d{1,2})\b|(?:^|\n)\s*(\d{1,2})(?:st|nd|rd|th)\s+race\b/gi)];
   for (let i = 0; i < marks.length; i++) {
     const n = +(marks[i][1] || marks[i][2]);
     if (out[n] && out[n].how === 'typed order') continue;
@@ -1140,9 +1144,20 @@ function parseResults(text, card) {
     let got = null;
     const ofm = block.match(/(?:order of finish|official order|finish order|finish)\s*[:\-]?\s*(\d{1,2}(?:\s*[-\/,]\s*\d{1,2}){1,4})/i);
     if (ofm) got = { order: valid(n, ofm[1].split(/[^\d]+/)), how: 'order of finish' };
+    // a results-chart table: "PRG  Runner  Win  Place  Show", one row per finisher, in order
+    if (!got || !got.order) {
+      const rows = [];
+      for (const line of block.split('\n')) {
+        const t = line.trim();
+        if (!t || /exotics|pick\s*(three|four|five|six|3|4|5|6)/i.test(t)) { if (rows.length) break; else continue; }
+        const row = t.match(/^(\d{1,2})\s+[A-Za-z][A-Za-z0-9'.\- ]{1,30}?\s*(?:\$?\s*[\d,]+\.\d{2}\s*){0,4}$/);
+        if (row) rows.push(+row[1]);
+      }
+      if (rows.length >= 2) got = { order: valid(n, rows), how: 'results chart (win/place/show)' };
+    }
     if (!got || !got.order) {
       let bestExotic = null;
-      for (const m of block.matchAll(/(high\s*5|pentafecta|superfecta|trifecta|exacta)[^\n\d$]*?(\d{1,2}(?:\s*[-\/]\s*\d{1,2}){1,4})/gi)) {
+      for (const m of block.matchAll(/(high\s*5|pent(?:afecta)?(?:\/str\s*fl)?|superfecta|trifecta|exacta)[^\n\d$]*?(\d{1,2}(?:\s*[-\/]\s*\d{1,2}){1,4})/gi)) {
         const v = valid(n, m[2].split(/[^\d]+/));
         if (v && (!bestExotic || v.length > bestExotic.order.length)) bestExotic = { order: v, how: `${m[1].toLowerCase()} payoff` };
       }
@@ -1161,6 +1176,38 @@ function parseResults(text, card) {
   }
   return out;
 }
+const SIZEW = { three: 3, 3: 3, four: 4, 4: 4, five: 5, 5: 5, six: 6, 6: 6 };
+function parsePayouts(text, card, bets) {
+  const clean = text.replace(/\r/g, '');
+  const marks = [...clean.matchAll(/(?:^|\n|\s)(?:race|r)\s*#?\s*[:.]?\s*(\d{1,2})\b/gi)];
+  const race = {}, multi = [];
+  const kindRe = /\$\s*([\d.]+)\s*(DOUBLE|DD|EXACTA|EX|TRIFECTA|TRI|TR|SUPERFECTA|SUP|SU|PICK\s*(?:3|4|5|6|THREE|FOUR|FIVE|SIX))\b([^\n$]*?)paid\s*\$?\s*([\d,]+\.\d{2})/gi;
+  for (let i = 0; i < marks.length; i++) {
+    const n = +marks[i][1];
+    if (!card.races.some((r) => r.number === n)) continue;
+    const block = clean.slice(marks[i].index, i + 1 < marks.length ? marks[i + 1].index : clean.length);
+    const p = {};
+    for (const m of block.matchAll(kindRe)) {
+      const per = +m[1], label = m[2].toUpperCase().replace(/\s+/g, ''), amt = +m[4].replace(/,/g, '');
+      if (/^EX/.test(label)) { p.ex = amt; p.exPer = per; }
+      else if (/^TR/.test(label)) { p.tri = amt; p.triPer = per; }
+      else if (/^(SU|SUP)/.test(label)) { p.sup = amt; p.supPer = per; }
+      else if (/^PICK/.test(label)) {
+        const sz = SIZEW[label.replace('PICK', '').toLowerCase()];
+        const legsm = m[3].match(/([\d,]+(?:\/[\d,]+){1,5})/);
+        const legs = legsm ? legsm[1].split('/').length : sz;
+        multi.push({ n, size: sz || legs, amt, per, label: `Pick ${sz || legs}` });
+      } else if (/^(DOUBLE|DD)/.test(label)) multi.push({ n, size: 2, amt, per, label: 'Double' });
+    }
+    if (Object.keys(p).length) race[n] = p;
+  }
+  const betPay = [];
+  for (const x of multi) {
+    const b = bets.find((b) => b.races.length === x.size && b.races[b.races.length - 1] === x.n && (x.label === 'Double' ? /double/i.test(b.name) : new RegExp(`pick\\s*${x.size}`, 'i').test(b.name)));
+    if (b) betPay.push({ b, amt: x.amt, per: x.per, label: `${b.name} R${b.races[0]}–${b.races[b.races.length - 1]}` });
+  }
+  return { race, betPay };
+}
 function renderResults() {
   const p = S.pasted;
   return `<div class="cardhead"><div><h1>Enter results</h1><div class="sub">${esc(S.card.track)} · ${esc(S.card.date)} · Paste results from the track's site, USTA, a chart or a text, then check and apply.</div></div></div>
@@ -1169,12 +1216,14 @@ function renderResults() {
     <div class="row" style="margin-top:8px"><button class="btn primary" data-act="parse-results">Read results</button><span class="note">Picks up "order of finish", trifecta / superfecta payoff lines, finish lines or horse names in finishing order.</span></div>
   </div>
   ${p ? `<div class="panel" style="margin-top:12px"><h3>Check before applying</h3>
-    ${Object.keys(p.found).length ? `<table class="rec"><thead><tr><th>Use</th><th>Race</th><th>Order found</th><th>Read from</th><th>Already entered</th></tr></thead><tbody>
-      ${S.card.races.filter((r) => p.found[r.number]).map((r) => { const f = p.found[r.number]; const cur = (S.st.results[r.number] || []).filter(Boolean);
+    ${Object.keys(p.found).length ? `<table class="rec"><thead><tr><th>Use</th><th>Race</th><th>Order found</th><th>Read from</th><th>Payouts found</th><th>Already entered</th></tr></thead><tbody>
+      ${S.card.races.filter((r) => p.found[r.number]).map((r) => { const f = p.found[r.number]; const cur = (S.st.results[r.number] || []).filter(Boolean); const pp = (p.pay && p.pay.race[r.number]) || {};
+        const pt = [['win', 'Win'], ['ex', 'Ex'], ['tri', 'Tri'], ['sup', 'Sup']].filter(([k]) => pp[k] != null).map(([k, l]) => `${l} ${dollars(pp[k])}${pp[k + 'Per'] ? ` /$${pp[k + 'Per']}` : ''}`).join(' · ');
         return `<tr><td><input type="checkbox" data-pr="${r.number}" checked aria-label="Use race ${r.number}"></td><td><b>${r.number}</b></td>
-        <td>${f.order.map((x) => `#${x} ${esc(tc(horseOf(r, x)?.name || ''))}`).join(' → ')}</td><td class="muted">${esc(f.how)}</td><td class="muted">${cur.length ? cur.join('-') : '—'}</td></tr>`; }).join('')}
+        <td>${f.order.map((x) => `#${x} ${esc(tc(horseOf(r, x)?.name || ''))}`).join(' → ')}</td><td class="muted">${esc(f.how)}</td><td class="muted">${pt || '—'}</td><td class="muted">${cur.length ? cur.join('-') : '—'}</td></tr>`; }).join('')}
       </tbody></table><div class="row" style="margin-top:8px"><button class="btn primary" data-act="apply-results">Apply checked results</button></div>`
-    : '<p class="note">Couldn\'t find any finishing orders in that text. Try including the race numbers, or type them as "1: 3-8-7-2".</p>'}</div>` : ''}`;
+    : '<p class="note">Couldn\'t find any finishing orders in that text. Try including the race numbers, or type them as "1: 3-8-7-2".</p>'}
+    ${p.pay && p.pay.betPay.length ? `<table class="rec" style="margin-top:10px"><thead><tr><th>Use</th><th>Ticket</th><th>Payout found</th></tr></thead><tbody>${p.pay.betPay.map((x, i) => `<tr><td><input type="checkbox" data-pbet="${i}" checked aria-label="Use this ticket payout"></td><td>${esc(x.label)}</td><td>${dollars(x.amt)} /$${x.per}</td></tr>`).join('')}</tbody></table>` : ''}</div>` : ''}`;
 }
 function applyResult(n, order) {
   const r = raceOf(n);
@@ -1273,9 +1322,9 @@ function renderRecord() {
     const rows = gradedRows(st);
     if (rows.length) { all.push(...rows); per.push([cards[k] || { track: k.split('|')[0], date: k.split('|')[1] || '' }, rows, st]); }
   }
-  const tickets = S.key ? S.bets.map((b) => pickPlan(b).t).filter((t) => t.graded != null) : [];
   const tab = S.key && S.prefs.recTab !== 'all' ? 'card' : 'all';
   const op = !!S.prefs.recPlayed;
+  const tickets = S.key ? S.bets.map((b) => pickPlan(b).t).filter((t) => t.graded != null && (!op || t.played)) : [];
   const rows = tab === 'card' ? cur : all;
   return `
   <div class="cardhead"><div><h1>Record</h1><div class="sub">Graded from the official orders you enter. Kept in this browser.</div></div>
@@ -1284,7 +1333,8 @@ function renderRecord() {
     <div class="seg" role="group" aria-label="Which bets"><button data-recplayed="0" class="${op ? '' : 'on'}">Every suggested bet</button><button data-recplayed="1" class="${op ? 'on' : ''}">Only bets I played</button></div></div>
   ${op ? '<p class="note">Showing only tickets you ticked <b>played</b> on the race pages (or with “Mark these as played” on the bet slip).</p>' : ''}
   ${recordTables(summarize(rows, op), rows)}
-  ${tab === 'card' && tickets.length ? `<div class="panel" style="margin-top:12px"><h3>Multi-race tickets</h3><table class="rec"><thead><tr><th>Ticket</th><th>Call</th><th>Used</th><th>Cost</th><th>Result</th></tr></thead><tbody>${tickets.map((t) => `<tr><td>${esc(t.b.name)} R${t.b.races[0]}–${t.b.races[t.b.races.length - 1]}</td><td>${verdictPill(t)}</td><td>${ticketLine(t)}</td><td>${dollars(t.cost)}</td><td>${t.graded ? '<span class="ok">hit</span>' : '<span class="no">miss</span>'}</td></tr>`).join('')}</tbody></table></div>` : ''}
+  ${tab === 'card' && tickets.length ? `<div class="panel" style="margin-top:12px"><h3>Multi-race tickets${op ? ' — played' : ''}</h3><table class="rec"><thead><tr><th>Ticket</th><th>Call</th><th>Used</th><th>Cost</th><th>Result</th><th>Returned</th><th>Net</th></tr></thead><tbody>${tickets.map((t) => `<tr><td>${esc(t.b.name)} R${t.b.races[0]}–${t.b.races[t.b.races.length - 1]}</td><td>${verdictPill(t)}</td><td>${ticketLine(t)}</td><td>${dollars(t.cost)}</td><td>${t.graded ? '<span class="ok">hit</span>' : '<span class="no">miss</span>'}</td><td>${t.pay == null ? (t.graded ? '—*' : '—') : dollars(t.ret)}</td><td>${t.ret == null ? '—' : `<b class="${t.ret - t.cost >= 0 ? 'ok' : 'no'}">${t.ret - t.cost >= 0 ? '+' : '−'}${dollars(Math.abs(t.ret - t.cost))}</b>`}</td></tr>`).join('')}</tbody></table>
+    <p class="note">Enter a payout on the Picks page once a ticket is graded to see its return. <b>*</b> hit, no payout entered yet.</p></div>` : ''}
   ${tab === 'all' ? recordChart(per) : ''}
   ${tab === 'all' && per.length ? `<div class="panel" style="margin-top:12px"><h3>Cards</h3><table class="rec"><thead><tr><th>Card</th><th>Graded</th><th>Winners</th></tr></thead><tbody>${per.map(([v, rows]) => `<tr><td>${esc(v.track)} · ${esc(v.date)}</td><td>${rows.length}</td><td>${rows.filter((x) => x.win).length}</td></tr>`).join('')}</tbody></table></div>` : ''}`;
 }
@@ -1916,12 +1966,22 @@ document.addEventListener('click', (e) => {
     if (S.suggestion && S.suggestion.final) applyMult({ ...S.suggestion.final });
   } else if (act === 'parse-results') {
     const text = $('#pasteBox').value;
-    S.pasted = { text, found: parseResults(text, S.card) };
+    S.pasted = { text, found: parseResults(text, S.card), pay: parsePayouts(text, S.card, S.bets) };
     render();
   } else if (act === 'apply-results') {
     const boxes = [...document.querySelectorAll('[data-pr]')];
     let nApplied = 0;
-    for (const b of boxes) if (b.checked) { applyResult(+b.dataset.pr, S.pasted.found[+b.dataset.pr].order); nApplied++; }
+    for (const b of boxes) if (b.checked) {
+      const n = +b.dataset.pr;
+      applyResult(n, S.pasted.found[n].order);
+      const pp = S.pasted.pay && S.pasted.pay.race[n];
+      if (pp) S.st.pay[n] = Object.assign({}, S.st.pay[n], pp);
+      nApplied++;
+    }
+    for (const b of document.querySelectorAll('input[data-pbet]')) if (b.checked && S.pasted.pay) {
+      const x = S.pasted.pay.betPay[+b.dataset.pbet];
+      if (x) S.st.picks[x.b.id] = Object.assign({}, S.st.picks[x.b.id], { pay: x.amt, per: x.per });
+    }
     saveState(); S.pasted = null; location.hash = '#/record'; render();
     if (S.card) rescoreAll();
     scheduleLearning(300);
@@ -1985,6 +2045,16 @@ document.addEventListener('change', async (e) => {
   if (t.dataset.pbase) {
     const st = S.st.picks[t.dataset.pbase] = S.st.picks[t.dataset.pbase] || {};
     st.base = +t.value; saveState(); render();
+  }
+  if (t.dataset.tpay || t.dataset.tper) {
+    const id = t.dataset.tpay || t.dataset.tper, st = S.st.picks[id] = S.st.picks[id] || {};
+    if (t.dataset.tpay) { const v = parseFloat(String(t.value).replace(/[$,\s]/g, '')); if (Number.isFinite(v) && v > 0) st.pay = v; else delete st.pay; }
+    else st.per = +t.value;
+    saveState(); render(); return;
+  }
+  if (t.dataset.tplayed) {
+    const id = t.dataset.tplayed, st = S.st.picks[id] = S.st.picks[id] || {};
+    st.played = t.checked; saveState(); return;
   }
   if (t.dataset.act === 'import' && t.files[0]) {
     try {
