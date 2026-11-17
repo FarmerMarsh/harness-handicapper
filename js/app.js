@@ -1,10 +1,11 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=13';
+import { parseProgram, fmtTime } from './parse.js?v=14';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=13';
+} from './engine.js?v=14';
+import { learnAll, learnedMult } from './learn.js?v=14';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -132,8 +133,15 @@ function weightsText(mult = S.mult) {
   return 'Custom weights: ' + customList(mult).map(([l, x]) => `${l} ${multText(x)}`).join(', ');
 }
 function weightsBadge() {
-  const prof = activeProfile();
-  if (prof) return `<a class="pill key" href="#/settings" title="${esc(weightsText(prof.mult))}">Track profile: ${esc(S.card.track)} (${prof.n} races)</a>`;
+  return weightsBadgeUser() + learnBadge();
+}
+function learnBadge() {
+  const L = S.learned;
+  if (!L || !L.n) return '';
+  const on = L.ok && S.prefs.learnUse !== false;
+  return ` <a class="pill ${on ? 'value' : ''}" href="#/settings" title="${on ? 'Weights adjusted from your results' : 'Learning — not applied yet'}">${on ? `Learned from ${L.n} races` : `Learning: ${L.n} races`}</a>`;
+}
+function weightsBadgeUser() {
   const pk = presetName();
   if (pk === 'normal') return `<a class="pill" href="#/settings">Weights: Normal</a>`;
   if (pk) return `<a class="pill key" href="#/settings">Weights: ${esc(PRESETS[pk].label)}</a>`;
@@ -205,12 +213,12 @@ function tuneHtml(compact = false) {
 }
 // how many top picks your weights change vs the plain track normal
 function normalTops() {
-  const ck = `${S.key}|${S.st.cond || 'fast'}|${JSON.stringify(S.st.scratches)}|${S.prefs.baseAuto !== false}|${S.prefs.season !== false}`;
+  const ck = `${S.key}|${S.learned ? S.learned.at : 0}|${S.prefs.learnUse !== false}|${S.st.cond || 'fast'}|${JSON.stringify(S.st.scratches)}|${S.prefs.baseAuto !== false}|${S.prefs.season !== false}`;
   if (S._nt && S._nt.k === ck) return S._nt.v;
   const raw = JSON.parse(S.base), v = {};
   for (const r of raw.races) {
     if (!r.horses.length) continue;
-    scoreRace(r, { ...scoreOpts(r), mult: DEFAULT_MULT, sim: false });
+    scoreRace(r, { ...scoreOpts(r), mult: learnedFor(r).mult, sim: false });   // track normal + learning, without your sliders
     v[r.number] = r.ranked.length ? r.ranked[0].pgm : null;
   }
   S._nt = { k: ck, v };
@@ -220,7 +228,7 @@ function diffText() {
   if (!S.card) return '';
   const nt = normalTops(), races = S.card.races.filter((r) => r.ranked && r.ranked.length);
   const d = races.filter((r) => nt[r.number] != null && nt[r.number] !== r.ranked[0].pgm);
-  return d.length ? `Your weights change the top pick in <b>${d.length}</b> of ${races.length} races vs the track normal (R${d.map((r) => r.number).join(', R')}).` : `Your weights pick the same winners as the track normal in all ${races.length} races.`;
+  return d.length ? `Your weights change the top pick in <b>${d.length}</b> of ${races.length} races vs the track normal${S.learned && S.learned.ok && S.prefs.learnUse !== false ? ' + learning' : ''} (R${d.map((r) => r.number).join(', R')}).` : `Your weights pick the same winners as the track normal in all ${races.length} races.`;
 }
 function syncTune() {
   for (const f of FACTORS) { const i = $('#m-' + f.key), o = $('#mo-' + f.key), x = S.mult[f.key] ?? 1; if (i) i.value = x; if (o) { o.textContent = multText(x); o.className = x > 1 ? 'up' : x < 1 ? 'down' : ''; } }
@@ -338,7 +346,10 @@ function rescoreAll() {
   S.driverTable = cardDriverTable(S.card);
   S.book = bookFor(S.card.track);
   for (const r of S.card.races) scoreOne(r);
-  if (!S._noted || S._noted !== S.key) { S._noted = S.key; noteTrack(S.card); S.book = bookFor(S.card.track); }
+  if (!S._noted || S._noted !== S.key) {
+    S._noted = S.key; const had = S.book && S.book.size != null; noteTrack(S.card); S.book = bookFor(S.card.track);
+    if (!had && S.learned && S.learned.ok) for (const r of S.card.races) scoreOne(r);   // size now known for the size layer
+  }
   S.bets = multiRaceBets(S.card).filter((b) => b.races.every((n) => raceOf(n)));
 }
 const PROFILE_KEY = 'hh:profiles';   // { trackName: { mult, n, hits, made } }
@@ -376,10 +387,153 @@ function autoLearn(track) {
   if (n < AUTO_PROFILE || (p && n < p.n + 10)) return;
   setTimeout(() => { learnTrack(track); if (S.key) rescoreAll(); render(); }, 60);
 }
-function effMult() { const p = activeProfile(); return p ? { ...DEFAULT_MULT, ...p.mult } : S.mult; }
+function effMult() { return S.mult; }
+// what learning adds for this race (all tracks × size × track × gait), plus tonight's lean if you applied one
+function learnedFor(r) {
+  const L = S.learned;
+  if (!L || !L.ok || !L.model || S.prefs.learnUse === false || !S.card) return { mult: {}, temp: 1 };
+  const size = r.track_size ?? (S.book && S.book.size);
+  return { mult: learnedMult(L.model, { size, track: S.card.track, gait: r.gait }), temp: L.model.temp || 1 };
+}
+const PACE_UP_K = ['early', 'pace'], PACE_DN_K = ['close', 'late'];
 function scoreOpts(r) {
-  return { today: S.today, year: S.year, mult: effMult(), driverTable: S.driverTable, scratched: S.st.scratches[r.number] || [], cond: S.st.cond || 'fast',
-    book: S.book, base: S.prefs.baseAuto !== false, season: S.prefs.season !== false };
+  const l = learnedFor(r), m = { ...S.mult };
+  for (const [k, v] of Object.entries(l.mult)) m[k] = (m[k] ?? 1) * v;
+  const lean = S.st.tonight || 0;
+  if (lean) { const f = 1.4 ** lean; for (const k of PACE_UP_K) m[k] = (m[k] ?? 1) * f; for (const k of PACE_DN_K) m[k] = (m[k] ?? 1) / f; }
+  return { today: S.today, year: S.year, mult: m, driverTable: S.driverTable, scratched: S.st.scratches[r.number] || [], cond: S.st.cond || 'fast',
+    book: S.book, base: S.prefs.baseAuto !== false, season: S.prefs.season !== false, temp: l.temp };
+}
+
+// ---------------- learning from results ----------------
+const LEARN_KEY = 'hh:learned';
+// every graded race: the model's view before the race + the official order
+function learnRows() {
+  const rows = [];
+  for (const [key, st] of allStates()) {
+    const track = key.split('|')[0];
+    const book = LS.get(TRACKS_KEY, {})[track] || {};
+    for (const [rn, fin] of Object.entries(st.results || {})) {
+      const snap = st.snaps && st.snaps[rn];
+      const order = [];
+      for (const x of fin || []) { if (!x) break; order.push(x); }
+      if (!snap || !snap.feat || !order.length || !snap.feat.some(([p]) => p === order[0])) continue;
+      const meta = snap.meta || {};
+      const trot = snap.feat.some(([, f]) => f && f.b && f.b.form > 1.05);
+      rows.push({ feat: snap.feat, fin: order.slice(0, 3), track: meta.track || track, size: meta.size ?? book.size ?? (TRACK_INFO[book.code] || {}).size ?? null,
+        gait: meta.gait || (trot ? 'TROT' : 'PACE'), card: key });
+    }
+  }
+  return rows;
+}
+let LW = null;
+function learnWorker() {
+  if (LW !== null) return LW;
+  try { LW = new Worker(new URL('./learnworker.js?v=14', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  return LW;
+}
+// re-learn a moment after results change (debounced so live entry doesn't thrash)
+function scheduleLearning(delay = 2500) {
+  if (S.prefs.learnFreeze) return;
+  clearTimeout(S._lt);
+  S._lt = setTimeout(runLearning, delay);
+}
+function runLearning() {
+  const rows = learnRows();
+  if (!rows.length) return;
+  S.learning = true; renderLearnStatus();
+  const done = (res) => {
+    S.learning = false;
+    if (!res) { renderLearnStatus(); return; }
+    const prevOk = S.learned && S.learned.ok;
+    S.learned = res; LS.set(LEARN_KEY, res);
+    if (S.key && (res.ok || prevOk)) rescoreAll();
+    render();
+  };
+  const w = learnWorker();
+  if (w) {
+    w.onmessage = (e) => done(e.data.ok ? e.data.result : (console.error(e.data.error), null));
+    w.onerror = (e) => { console.error(e); LW = false; setTimeout(() => done(learnAll(rows)), 20); };
+    w.postMessage({ rows });
+  } else setTimeout(() => done(learnAll(rows)), 20);
+}
+function renderLearnStatus() {
+  const el = $('#learnStatus');
+  if (el) el.innerHTML = learnStatusText();
+}
+function learnStatusText() {
+  const L = S.learned;
+  if (S.learning) return 'Learning from your results…';
+  if (!L || !L.n) return 'No graded races yet — enter official orders on the race pages or paste them in.';
+  const when = new Date(L.at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  return `${L.n} graded races (${L.nPos} finish positions) · updated ${when}${S.prefs.learnFreeze ? ' · <b>frozen</b>' : ''}`;
+}
+const KLABEL = Object.fromEntries(FACTORS.map((f) => [f.key, f.label]));
+function learnChanges(o, min = 0.09) {
+  return Object.entries(o || {}).filter(([, v]) => Math.abs(Math.log(v)) >= min).sort((a, b) => Math.abs(Math.log(b[1])) - Math.abs(Math.log(a[1])))
+    .map(([k, v]) => `<span class="pill ${v > 1 ? 'value' : 'badv'}">${esc(KLABEL[k] || k)} ${multText(+v.toFixed(2))}</span>`);
+}
+function learningHtml() {
+  const L = S.learned, on = S.prefs.learnUse !== false;
+  let body = `<p class="note" id="learnStatus">${learnStatusText()}</p>`;
+  if (L && L.n) {
+    const cv = L.cv || {};
+    const stat = !L.ok ? (cv.n ? '<b>Holding</b> — on races it hadn\'t seen, the learned weights didn\'t beat normal yet, so normal weights stay in use.' : 'Needs results from at least 3 programs before it can test itself.')
+      : on ? '<b class="gv">In use</b> — every race is scored with what your results have taught it.' : 'Learned but switched off.';
+    body += `<p>${stat}</p>`;
+    if (cv.n) {
+      body += `<p class="note">Tested on races it hadn't seen (whole programs held out): learned weights picked <b>${cv.hitsL}</b> winners of ${cv.n}, normal weights <b>${cv.hitsN}</b>. Rating of the real finishers: ${cv.llL >= cv.llN ? '<span class="gv">better</span>' : '<span class="bv">worse</span>'} (${((cv.llL - cv.llN) / cv.n).toFixed(3)} per race).</p>`;
+      const rows = cv.calib.filter((b) => b.n >= 5).map((b) => `<tr><td>${Math.round(b.lo * 100)}–${Math.round(Math.min(1, b.hi) * 100)}%</td><td>${b.n}</td><td>${Math.round((100 * b.pred) / b.n)}%</td><td><b>${Math.round((100 * b.wins) / b.n)}%</b></td></tr>`).join('');
+      if (rows) body += `<details><summary class="note">Are our lines honest? (horses we gave X% — how often they won)</summary><table class="rec"><thead><tr><th>We said</th><th>Horses</th><th>Avg</th><th>Won</th></tr></thead><tbody>${rows}</tbody></table></details>`;
+    }
+    if (L.model) {
+      const M = L.model, parts = [];
+      const g = learnChanges(M.G); if (g.length) parts.push(`<p><b>All tracks:</b> ${g.join(' ')}</p>`);
+      for (const [sz, o] of Object.entries(M.S || {})) { const c = learnChanges(o); if (c.length) parts.push(`<p><b>${esc(SIZE_LABEL[sz] || sz)} tracks</b> (${L.counts.size[sz] || 0}): ${c.join(' ')}</p>`); }
+      for (const [tr, o] of Object.entries(M.T || {})) { const c = learnChanges(o); if (c.length) parts.push(`<p><b>${esc(tr)}</b> (${L.counts.track[tr] || 0}): ${c.join(' ')}</p>`); }
+      for (const [ga, o] of Object.entries(M.A || {})) { const c = learnChanges(o); if (c.length) parts.push(`<p><b>${ga === 'TROT' ? 'Trotters' : 'Pacers'}</b> (${L.counts.gait[ga] || 0}): ${c.join(' ')}</p>`); }
+      if (M.temp && Math.abs(M.temp - 1) >= 0.05) parts.push(`<p><b>Lines:</b> ${M.temp > 1 ? 'spread a little tighter (favourites were winning less than we said)' : 'spread a little wider (favourites were winning more than we said)'} — ×${M.temp}</p>`);
+      body += parts.length ? `<h4>What it has learned</h4>${parts.join('')}` : '<p class="note">Nothing has moved yet — with few races every layer stays close to normal on purpose. It moves further as more results go in.</p>';
+    }
+  }
+  body += `<div class="row" style="margin-top:8px">
+    <label class="row note"><input type="checkbox" data-act="learn-use" ${on ? 'checked' : ''}> Use learned weights</label>
+    <label class="row note"><input type="checkbox" data-act="learn-freeze" ${S.prefs.learnFreeze ? 'checked' : ''}> Freeze (stop updating)</label>
+    <button class="btn small" data-act="learn-now">Re-learn now</button></div>`;
+  return `<div class="panel learnp"><h3>Learning from your results</h3>
+    <p class="note">Every result you enter is kept with what the model knew before the race. It learns in layers — all tracks → track size → each track → trotters / pacers — each starting from the one above and pulled back toward it, so a handful of races barely moves anything and hundreds can move a lot. It also checks whether a horse we call 20% really wins about 20%. Learned weights sit on top of the track normal; your own sliders sit on top of that.</p>
+    ${body}</div>`;
+}
+
+// ---------------- tonight: how the card is playing so far ----------------
+function tonightInfo() {
+  if (!S.key) return null;
+  let n = 0, early = 0, close = 0, inside = 0;
+  const posts = [];
+  for (const [rn, fin] of Object.entries(S.st.results || {})) {
+    const snap = S.st.snaps && S.st.snaps[rn], w = (fin || [])[0];
+    if (!snap || !snap.feat || !w || !snap.feat.some(([p]) => p === w)) continue;
+    n++;
+    const rank = (k) => { const v = snap.feat.map(([p, f]) => [p, (f && f.c && f.c[k]) ?? 0.5]).sort((a, b) => b[1] - a[1]); return v.findIndex(([p]) => p === w) + 1; };
+    if (rank('early') <= 3) early++;
+    if (rank('close') <= 3) close++;
+    if (w <= 3) inside++;
+    posts.push(w);
+  }
+  if (n < 3) return { n };
+  let lean = 0, why = '';
+  if (early / n >= 0.7 && early - close >= 2) { lean = n >= 5 ? 1 : 0.5; why = 'Speed is holding'; }
+  else if (close / n >= 0.7 && close - early >= 2) { lean = n >= 5 ? -1 : -0.5; why = 'Closers are getting there'; }
+  return { n, early, close, inside, posts, lean, why };
+}
+function tonightHtml() {
+  const t = tonightInfo();
+  if (!t || t.n < 3) return '';
+  const cur = S.st.tonight || 0;
+  const facts = `${t.n} races in: ${t.early} winners had top-3 early speed, ${t.close} were top-3 closers; winning posts ${t.posts.join(', ')}.`;
+  if (cur) return `<div class="tonight on"><b>Tonight:</b> leaning ${cur > 0 ? 'toward speed' : 'toward closers'} (${cur > 0 ? '+' : ''}${cur}) for the rest of this card. <span class="note">${facts}</span> <button class="btn small" data-tonight="0">Remove</button></div>`;
+  if (!t.lean) return `<div class="tonight"><b>Tonight so far:</b> no clear lean. <span class="note">${facts}</span></div>`;
+  return `<div class="tonight"><b>Tonight: ${t.why}.</b> <span class="note">${facts} Small samples fool you — this is a light tilt.</span> <button class="btn small primary" data-tonight="${t.lean}">Lean ${t.lean > 0 ? 'toward speed' : 'toward closers'} for the rest of tonight</button></div>`;
 }
 function scoreOne(r) { scoreRace(r, scoreOpts(r)); }
 
@@ -442,6 +596,7 @@ function snapshot(r) {
     value: { good: [...(r.value?.good || [])], bad: [...(r.value?.bad || [])] },
     vdet: r.ranked.filter((h) => h.value).map((h) => [h.pgm, h.value, h.ml_prob ?? null, h.win_prob, h.ml, h.line]),
     feat: r.ranked.map((h) => [h.pgm, h.feat]),
+    meta: { track: S.card ? S.card.track : null, size: r.track_size ?? null, gait: r.gait || '', code: r.track_code || null, date: S.today || null },
   };
 }
 // grading for snapshots saved before tickets carried legs
@@ -543,6 +698,7 @@ function renderCard() {
   <div class="condbar"><span class="note">Track today:</span><div class="seg" role="group" aria-label="Track condition">
     <button data-cond="fast" class="${(S.st.cond || 'fast') === 'fast' ? 'on' : ''}">Fast</button><button data-cond="off" class="${S.st.cond === 'off' ? 'on' : ''}">Off (good / sloppy / muddy)</button></div>
     <span class="note">${S.st.cond === 'off' ? 'Off-track records, sire off-track stats and the off-track post stats now count.' : 'Switch to Off if the track comes up wet — it re-ranks every race.'}</span></div>
+  ${tonightHtml()}
   ${summaryCard()}
   <div class="races">
     ${c.races.map((r) => {
@@ -759,6 +915,7 @@ function renderRace(n) {
   return `
   <div class="racenav"><a class="btn small" href="#/">← Card</a>
     <div class="tabs">${S.card.races.map((x) => `<a href="#/race/${x.number}" class="${x.number === n ? 'on' : ''}">${x.number}</a>`).join('')}</div></div>
+  ${tonightHtml()}
   <div id="raceTop">${raceTopHtml(r)}</div>
   <div class="tunebar"><button class="btn small ${S.tuneOpen ? 'primary' : ''}" data-act="tune" aria-expanded="${S.tuneOpen}">${S.tuneOpen ? 'Hide weights' : 'Tune weights'}</button><span id="wbadge">${weightsBadge()}</span>${r.base_parts && r.base_parts.length ? `<span class="note">Normal here: ${esc(r.base_parts.join(' · '))}</span>` : ''}</div>
   ${S.tuneOpen ? tuneHtml(true) : ''}
@@ -1151,8 +1308,7 @@ function renderSettings() {
   <div class="panel" style="margin-top:12px"><h3>Email</h3>
     <div class="row"><label class="note" for="emailTo">Send-to address(es) for Email PDF — separate with commas (used when your browser opens an email draft)</label></div>
     <div class="row"><input id="emailTo" class="txt" type="email" multiple value="${esc(S.prefs.emailTo)}" placeholder="you@example.com, friend@example.com"><button class="btn" data-act="save-email">Save</button><span class="note" id="emailSaved"></span></div></div>
-  <div style="margin-top:12px">${suggestionHtml()}</div>
-  <div style="margin-top:12px">${profilesHtml()}</div>
+  <div style="margin-top:12px">${learningHtml()}</div>
   <div style="margin-top:12px">${methodHtml()}</div>`;
 }
 
@@ -1483,7 +1639,7 @@ function renderRecent() {
 
 // ---------------- events ----------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn],[data-cbudget],[data-setplays],[data-switch]');
+  const t = e.target.closest('[data-scr],[data-sort],[data-view],[data-act],[data-open],[data-preset],[data-pick],[data-pbudget],[data-preset-ticket],[data-cond],[data-learn],[data-unlearn],[data-cbudget],[data-setplays],[data-switch],[data-tonight]');
   if (!t) return;
   const act = t.dataset.act;
   if (act === 'use-link') {
@@ -1498,6 +1654,10 @@ document.addEventListener('click', (e) => {
     const [name, v] = t.dataset.setplays.split('|'); const books = LS.get(TRACKS_KEY, {}); books[name] = { ...(books[name] || { cards: {} }), plays: v }; LS.set(TRACKS_KEY, books);
     if (S.key) rescoreAll(); render(); return;
   }
+  if (t.dataset.tonight !== undefined) { S.st.tonight = +t.dataset.tonight; saveState(); rescoreAll(); render(); return; }
+  if (act === 'learn-use') { S.prefs.learnUse = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
+  if (act === 'learn-freeze') { S.prefs.learnFreeze = t.checked; LS.set(PREF_KEY, S.prefs); render(); return; }
+  if (act === 'learn-now') { runLearning(); return; }
   if (act === 'toggle-base') { S.prefs.baseAuto = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
   if (act === 'toggle-season') { S.prefs.season = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
   if (act === 'adv') { S.advOpen = !t.closest('details').open; return; }
@@ -1595,7 +1755,8 @@ document.addEventListener('click', (e) => {
     let nApplied = 0;
     for (const b of boxes) if (b.checked) { applyResult(+b.dataset.pr, S.pasted.found[+b.dataset.pr].order); nApplied++; }
     saveState(); S.pasted = null; location.hash = '#/record'; render();
-    if (S.card) { autoLearn(S.card.track); rescoreAll(); }
+    if (S.card) rescoreAll();
+    scheduleLearning(300);
     if (nApplied) setTimeout(() => alert(`Applied results for ${nApplied} race${nApplied > 1 ? 's' : ''}.`), 50);
   } else if (act === 'export') {
     const cards = LS.get(CARDS_KEY, {});
@@ -1621,7 +1782,7 @@ document.addEventListener('change', async (e) => {
     arr[+t.dataset.pos] = t.value ? +t.value : null;
     S.st.results[n] = arr;
     if (arr.some(Boolean)) S.st.snaps[n] = snapshot(raceOf(n)); else delete S.st.snaps[n];
-    saveState(); render();
+    saveState(); render(); scheduleLearning();
   }
   if (t.dataset.pbase) {
     const st = S.st.picks[t.dataset.pbase] = S.st.picks[t.dataset.pbase] || {};
@@ -1692,10 +1853,14 @@ function applyMult(m) {
   S.prefs = { ...S.prefs, ...LS.get(PREF_KEY, {}) };
   readSharedFromUrl();
   pruneCards();
+  S.learned = LS.get(LEARN_KEY, null);
   const cards = LS.get(CARDS_KEY, {});
   const keys = Object.keys(cards).sort((a, b) => cards[b].savedAt - cards[a].savedAt);
   const last = LS.get('hh:open', null);
   const pick = last && cards[last] ? last : keys[0];
   if (pick && getCard(pick)) openCard(pick, getCard(pick));
   render();
+  // catch up if results were entered since the last fit (or on another version)
+  const nRows = learnRows().length;
+  if (nRows && (!S.learned || S.learned.raw !== nRows || S.learned.v !== 1)) scheduleLearning(1500);
 })();

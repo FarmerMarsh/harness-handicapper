@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=13';
+import { fmtTime } from './parse.js?v=14';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -7,6 +7,7 @@ const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
 // Points → win chance: p ∝ exp(score / TEMP). 35 keeps the lines in step with real morning lines
 // (favorites mostly 8-5 to 3-1, nothing shorter than even money on a normal card).
 export const TEMP = 35;
+let CUR_TEMP = TEMP;   // learning can widen or tighten the lines (temp × 0.7–1.4)
 
 export const DEFAULT_WEIGHTS = {
   speed: 30,      // one speed number (v11): avg speed rating 55% + avg adjusted mile 25% + best rating 20%, clean last 4
@@ -88,7 +89,7 @@ export function baseMult(race, { today, book, season = true } = {}) {
 }
 // Weighted points are rescaled to this total so adding factors (or turning some up) doesn't
 // change how spread out the win chances are — only which horses get the credit.
-const BASE_SUM = 108;
+export const BASE_SUM = 108;
 
 // Everything a user can turn up or down. Multiplier 1 = normal.
 export const FACTORS = [
@@ -397,7 +398,7 @@ function mulberry32(a) {
 function simulate(ranked, n = 40000, seed = 7) {
   const rnd = mulberry32(seed);
   const k = ranked.length;
-  const lam = ranked.map((h) => h.score / TEMP);
+  const lam = ranked.map((h) => h.score / CUR_TEMP);
   const posCount = Array.from({ length: k }, () => new Array(k).fill(0));
   const c = { key234: 0, key23: 0, box3: 0, box4: 0, straight: 0, exKey: 0, exBox3: 0, exBox2: 0, sfKey: 0, sfBox4: 0, sfKey3: 0 };
   const near = new Array(k).fill(0);
@@ -797,8 +798,10 @@ function postIndexSrc(race, h) {
   return { v: g, src: `typical ${SIZE_LABEL[race.track_size] || '⅝-mile'} post index` };
 }
 
-export function scoreRace(race, { today, year, mult, driverTable, scratched = [], sim = true, cond = 'fast', book = null, books = null, season = true, base = true }) {
+export function scoreRace(race, { today, year, mult, driverTable, scratched = [], sim = true, cond = 'fast', book = null, books = null, season = true, base = true, temp = 1 }) {
   race.cond = cond;
+  CUR_TEMP = TEMP * (temp || 1);
+  race.temp = CUR_TEMP;
   const grp = (key) => (key === 'lone_speed' || key === 'speed_duel' || key === 'closer_setup' ? 'pace'
     : key.startsWith('driver_') ? 'driver_change' : 'tough_trip');
   let cur = null;
@@ -890,7 +893,7 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
     h.comp = Object.fromEntries(Object.keys(W).map((k) => [k, comp[k] ? comp[k][i] : 0]));
   });
   const ranked = [...hs].sort((a, b) => b.score - a.score);
-  const ex = ranked.map((h) => Math.exp(h.score / TEMP));
+  const ex = ranked.map((h) => Math.exp(h.score / CUR_TEMP));
   const tot = ex.reduce((a, b) => a + b, 0);
   ranked.forEach((h, i) => { h.win_prob = ex[i] / tot; h.fair_odds = 1 / h.win_prob - 1; h.rank = i + 1; });
   race.ranked = ranked;
