@@ -1,12 +1,12 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=22';
+import { parseProgram, fmtTime } from './parse.js?v=23';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=22';
-import { learnAll, learnedMult } from './learn.js?v=22';
-import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=22';
+} from './engine.js?v=23';
+import { learnAll, learnedMult } from './learn.js?v=23';
+import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=23';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -322,6 +322,7 @@ function switchTo(key, hash) {
   if (!card) return;
   if (S.key) S.lastRoute[S.key] = location.hash || '#/';
   openCard(key, card);
+  scheduleLearning(800);   // v22: refresh the pool for this track (post-index + cross-night Trends), even with 0 local results yet
   const m = (hash || '').match(/race\/(\d+)/);
   let to = hash ?? S.lastRoute[key] ?? '#/';
   if (m && !card.races.some((r) => r.number === +m[1])) to = '#/';
@@ -350,7 +351,7 @@ function openCard(key, card) {
   S.key = key;
   LS.set('hh:open', key);
   S.base = JSON.stringify(card);
-  S.st = { scratches: {}, notes: {}, results: {}, snaps: {}, picks: {}, pay: {}, played: {}, drivers: {}, live: {}, ...LS.get(stateKey(key), {}) };
+  S.st = { scratches: {}, notes: {}, results: {}, snaps: {}, picks: {}, pay: {}, played: {}, drivers: {}, live: {}, liveOpen: {}, ...LS.get(stateKey(key), {}) };
   S.st.picks = S.st.picks || {};
   rescoreAll();
 }
@@ -419,7 +420,10 @@ function scoreOpts(r) {
   if (lean) { const f = 1.4 ** lean; for (const k of PACE_UP_K) m[k] = (m[k] ?? 1) * f; for (const k of PACE_DN_K) m[k] = (m[k] ?? 1) / f; }
   return { today: S.today, year: S.year, mult: m, driverTable: S.driverTable, scratched: S.st.scratches[r.number] || [], cond: S.st.cond || 'fast',
     book: S.book, base: S.prefs.baseAuto !== false, season: S.prefs.season !== false, temp: l.temp,
-    blend: (S.prefs.mlBlend ?? 35) / 100, live: (S.st.live || {})[r.number] || null, drivers: driverOverrides(r.number) };
+    blend: (S.prefs.mlBlend ?? 35) / 100, live: (S.st.live || {})[r.number] || null,
+    // v22 (#52): the first live-odds reading entered for each horse, kept alongside the current one so the
+    // engine can flag real drift between them. Off entirely when the pref is off, or nothing's been typed twice.
+    liveOpen: S.prefs.liveDrift === false ? null : (S.st.liveOpen || {})[r.number] || null, drivers: driverOverrides(r.number) };
 }
 
 // ---------------- learning from results ----------------
@@ -447,7 +451,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=22', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=23', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -459,19 +463,23 @@ function scheduleLearning(delay = 2500) {
 async function runLearning() {
   const local = learnRows();
   // merge in the shared pool (every result anyone's entered, anywhere) — best-effort, never blocks on a slow/offline pool
-  let poolRows = [];
-  try { poolRows = (await pullPool()).map(poolRowToLearnRow).filter(Boolean); } catch { poolRows = []; }
+  let raw = [], poolRows = [];
+  try { raw = await pullPool(); poolRows = raw.map(poolRowToLearnRow).filter(Boolean); } catch { raw = []; poolRows = []; }
+  S._poolRaw = raw;   // v22 (#50/#51): kept raw (not just the learn-shaped rows) for post-index + cross-night Trends
   const poolKeys = new Set(poolRows.map((r) => r.key));
   const rows = [...poolRows, ...local.filter((r) => !r.key || !poolKeys.has(r.key))];
   S.poolRows = poolRows.length;
-  if (!rows.length) return;
+  // v22: nothing to (re)learn globally, but pooled post-index/Trends data for the open track may still have
+  // changed — one render covers it. Exactly one render() per call either way, so a scroll-synced bar
+  // (mini confidence bar, floating header) never gets reset twice by the same pool refresh.
+  if (!rows.length) { if (S.key) rescoreAll(); render(); return; }
   S.learning = true; renderLearnStatus();
   const done = (res) => {
     S.learning = false;
     if (!res) { renderLearnStatus(); return; }
     const prevOk = S.learned && S.learned.ok;
     S.learned = res; LS.set(LEARN_KEY, res);
-    if (S.key && (res.ok || prevOk)) rescoreAll();
+    if (S.key) rescoreAll();   // v22: always refresh — pooled post-index/Trends can change even when res.ok/prevOk don't
     render();
   };
   const w = learnWorker();
@@ -626,11 +634,67 @@ function trendsInfo() {
     .sort((a, b) => a.post - b.post);
   return { n, early, close, lean, why, topWon, top3, posts, gaitRows };
 }
+// v22 (#51): the same pace/post picture as trendsInfo(), but pooled across every graded race at this
+// track from every night anyone's used the site — not just tonight's card. Needs a real sample before
+// it's worth showing; under TRACK_TREND_MIN races it stays quiet rather than drawing conclusions from noise.
+const TRACK_TREND_MIN = 10;
+function trackTrendsInfo(name) {
+  const rows = trackPoolMerge(name);
+  const n = rows.length;
+  if (n < TRACK_TREND_MIN) return { n };
+  let early = 0, close = 0;
+  const postRows = new Map();
+  for (const r of rows) {
+    const rank = (k) => { const v = r.feat.map(([p, f]) => [p, (f && f.c && f.c[k]) ?? 0.5]).sort((a, b) => b[1] - a[1]); return v.findIndex(([p]) => p === r.win) + 1; };
+    if (rank('early') <= 3) early++;
+    if (rank('close') <= 3) close++;
+    const pn = r.pn ? new Map(r.pn) : null;
+    for (const e of r.feat) {
+      const pgm = e[0], p = pn ? (pn.get(pgm) ?? pgm) : entryPost(e);
+      if (!(p >= 1)) continue;
+      const row = postRows.get(p) || { starts: 0, wins: 0, idxSum: 0, idxN: 0 };
+      row.starts++;
+      if (pgm === r.win) row.wins++;
+      if (e[1] && e[1].c && e[1].c.post != null) { row.idxSum += e[1].c.post; row.idxN++; }
+      postRows.set(p, row);
+    }
+  }
+  const totalStarts = [...postRows.values()].reduce((a, r) => a + r.starts, 0);
+  const avgWin = totalStarts ? n / totalStarts : null;
+  const posts = [...postRows.entries()].map(([post, r]) => {
+    const idx = r.idxN ? (r.idxSum / r.idxN - 0.5) * 130 : null;
+    const modelPct = idx != null && avgWin != null ? Math.max(0, avgWin * (1 + idx / 100)) : null;
+    return { post, ...r, modelPct };
+  }).filter((p) => p.post >= 1 && p.post <= 20).sort((a, b) => a.post - b.post);
+  const { hits } = evalMult(rows, {});   // today's default weights vs. the field, same proxy the weight-suggestion tool uses
+  return { n, early, close, posts, hits };
+}
+function trackTrendsHtml(name, pct) {
+  const tt = trackTrendsInfo(name);
+  if (tt.n < TRACK_TREND_MIN) return '';
+  const postHtml = `<table class="rec"><thead><tr><th>Post</th><th>Starts</th><th>Wins</th><th>Win%</th><th>Model expected</th></tr></thead><tbody>
+    ${tt.posts.map((p) => {
+      const actualPct = p.starts ? (100 * p.wins) / p.starts : null;
+      const modelPct = p.modelPct != null ? 100 * p.modelPct : null;
+      const hot = p.starts >= 4 && actualPct != null && modelPct != null && actualPct - modelPct >= 12;
+      const cold = p.starts >= 4 && actualPct != null && modelPct != null && modelPct - actualPct >= 12;
+      return `<tr${hot ? ' style="background:var(--row-hot)"' : cold ? ' style="background:var(--row-cold)"' : ''}><td>${p.post}</td><td>${p.starts}</td><td>${p.wins}</td><td>${actualPct != null ? Math.round(actualPct) + '%' : '—'}</td><td>${modelPct != null ? Math.round(modelPct) + '%' : '—'}</td></tr>`;
+    }).join('')}
+  </tbody></table>`;
+  return `<div class="panel" style="margin-top:12px"><h3>Across every pooled night at ${esc(name)}</h3>
+    <p class="note">${tt.n} graded races total — the shared pool plus this browser's own results, not just tonight. Needs 4+ starts at a post before calling it hot or cold.</p>
+    <div class="row note" style="gap:16px;flex-wrap:wrap">
+      <span><b>${tt.early}/${tt.n}</b> winners (${pct(tt.early, tt.n)}) top-3 early speed</span>
+      <span><b>${tt.close}/${tt.n}</b> winners (${pct(tt.close, tt.n)}) top-3 closers</span>
+      <span>today's default model has picked the winner <b>${tt.hits}/${tt.n}</b> (${pct(tt.hits, tt.n)})</span>
+    </div>${postHtml}</div>`;
+}
 function renderTrends() {
   const t = trendsInfo();
   const head = `<div class="cardhead"><div><h1>Trends</h1><div class="sub">${esc(S.card.track)} · ${esc(S.card.date)} · How tonight's graded races are actually running — fills in as you enter more results.</div></div></div>`;
-  if (!t || t.n < 3) return `${head}<div class="panel"><p class="note">Enter a few official results (${t ? t.n : 0} graded so far — need at least 3) and tonight's pace, post and pick trends will show up here.</p></div>`;
   const pct = (a, b) => (b ? Math.round((100 * a) / b) + '%' : '—');
+  const poolBlock = trackTrendsHtml(S.card.track, pct);
+  if (!t || t.n < 3) return `${head}<div class="panel"><p class="note">Enter a few official results (${t ? t.n : 0} graded so far — need at least 3) and tonight's pace, post and pick trends will show up here.</p></div>${poolBlock}`;
   const paceRow = `<div class="row note" style="gap:16px;flex-wrap:wrap">
     <span><b>${t.early}/${t.n}</b> winners (${pct(t.early, t.n)}) were top-3 on early speed</span>
     <span><b>${t.close}/${t.n}</b> winners (${pct(t.close, t.n)}) were top-3 closers</span>
@@ -655,7 +719,7 @@ function renderTrends() {
   return `${head}
   <div class="panel"><h3>Pace tonight</h3>${paceRow}${leanP}${gaitHtml}</div>
   <div class="panel" style="margin-top:12px"><h3>Posts tonight</h3><p class="note">Every horse that started, not just winners. "Model expected" is the usual post edge for this track/size; green rows are running hotter than that, pink rows colder. Under 3 starts isn't marked either way.</p>${postHtml}</div>
-  <div class="panel" style="margin-top:12px"><h3>How our picks are doing</h3>${pickP}</div>
+  <div class="panel" style="margin-top:12px"><h3>How our picks are doing</h3>${pickP}</div>${poolBlock}
   <p class="note" id="poolStatus" style="margin-top:10px">${poolStatusLine()}</p>`;
 }
 // ---------------- floating header for the horse table ----------------
@@ -751,22 +815,31 @@ function driverOverrides(n) {
 
 // ---------------- track book: what we know and learn about each track ----------------
 const TRACKS_KEY = 'hh:tracks';   // { trackName: { code, size, plays, post_tm, cards: { date: races } } }
-// learned from the results you've entered at this track: wins by post, and whether winners had early or late speed
+// v22 (#50/#51): every graded race at this track — the shared pool (everyone, every night) plus this browser's
+// own local results not yet reflected there, deduped by race key so a race pushed to the pool isn't double-counted
+// from the local copy too. Falls back to local-only automatically whenever the pool is empty/unreachable.
+function trackPoolMerge(name) {
+  const trackKey = normKey(name);
+  const pool = (S._poolRaw || []).filter((r) => r.track_key === trackKey && r.entries && r.finish && r.finish.length && r.entries.some((e) => e[0] === r.finish[0]));
+  const poolKeys = new Set(pool.map((r) => poolKeyFor(r.track_key, r.race_date, r.race_no)));
+  const local = trainingRows(name).filter((r) => !r.key || !poolKeys.has(r.key));
+  return [...pool.map((r) => ({ feat: r.entries, win: r.finish[0] })), ...local.map((r) => ({ feat: r.feat, win: r.win, pn: r.pn }))];
+}
+// wins by post, and whether winners had early or late speed — pool ∪ local (see trackPoolMerge)
 function trackLearn(name) {
+  const rows = trackPoolMerge(name);
   const wins = [], starts = [];
   let n = 0, early3 = 0, close3 = 0;
-  for (const [key, st] of allStates()) {
-    if (key.split('|')[0] !== name) continue;
-    for (const [rn, fin] of Object.entries(st.results || {})) {
-      const snap = st.snaps && st.snaps[rn], w = (fin || [])[0];
-      if (!snap || !snap.feat || !w || !snap.feat.some(([p]) => p === w)) continue;
-      n++;
-      for (const [p] of snap.feat) starts[p - 1] = (starts[p - 1] || 0) + 1;
-      wins[w - 1] = (wins[w - 1] || 0) + 1;
-      const rankBy = (k) => { const vals = snap.feat.map(([p, f]) => [p, (f && f.c && f.c[k]) ?? 0.5]).sort((a, b) => b[1] - a[1]); return vals.findIndex(([p]) => p === w) + 1; };
-      if (rankBy('early') <= 3) early3++;
-      if (rankBy('close') <= 3) close3++;
+  for (const r of rows) {
+    n++;
+    const pn = r.pn ? new Map(r.pn) : null;
+    for (const e of r.feat) {
+      const pgm = e[0], p = pn ? (pn.get(pgm) ?? pgm) : entryPost(e);
+      if (p >= 1) { starts[p - 1] = (starts[p - 1] || 0) + 1; if (pgm === r.win) wins[p - 1] = (wins[p - 1] || 0) + 1; }
     }
+    const rankBy = (k) => { const vals = r.feat.map(([p, f]) => [p, (f && f.c && f.c[k]) ?? 0.5]).sort((a, b) => b[1] - a[1]); return vals.findIndex(([p]) => p === r.win) + 1; };
+    if (rankBy('early') <= 3) early3++;
+    if (rankBy('close') <= 3) close3++;
   }
   const len = Math.max(wins.length, starts.length);
   for (let i = 0; i < len; i++) { wins[i] = wins[i] || 0; starts[i] = starts[i] || 0; }
@@ -1473,8 +1546,15 @@ function poolRowFor(n, snap) {
   const dateStr = ymd(meta.date ?? S.today);
   const trackKey = normKey(meta.track || (S.card && S.card.track) || '');
   if (!trackKey || !dateStr || !snap.feat || !S.st.results[n]) return null;
-  return { track_key: trackKey, race_date: dateStr, race_no: n, gait: meta.gait || null, track_size: meta.size ?? null, entries: snap.feat, finish: firstRun(S.st.results[n]) };
+  // v22 (#50/#51): each horse's post number rides along as a 3rd array element so the pool can validate/replace
+  // the typical post-index table and build cross-night Trends — no schema change, `entries` is already jsonb,
+  // and anything reading these rows as plain [pgm, feat] pairs (poolRowToLearnRow, the learner) is unaffected.
+  const pn = new Map(snap.pn || []);
+  const entries = snap.feat.map(([pgm, f]) => [pgm, f, pn.get(pgm) ?? pgm]);
+  return { track_key: trackKey, race_date: dateStr, race_no: n, gait: meta.gait || null, track_size: meta.size ?? null, entries, finish: firstRun(S.st.results[n]) };
 }
+// post number for one pool/local entry: new rows carry it as a 3rd element, older rows fall back to program number
+const entryPost = (e) => (e.length > 2 && e[2] != null ? e[2] : e[0]);
 function syncGradedRace(n) {
   const snap = S.st.snaps && S.st.snaps[n];
   if (!snap) return;
@@ -1599,12 +1679,15 @@ const MIN_RACES = 30, GOOD_RACES = 100;
 function trainingRows(track = null) {
   const rows = [];
   for (const [key, st] of allStates()) {
-    if (track && key.split('|')[0] !== track) continue;
+    const t = key.split('|')[0];
+    if (track && t !== track) continue;
+    const dateStr = ymd(cardDate({ date: key.split('|')[1] }));
     for (const [rn, fin] of Object.entries(st.results || {})) {
       const snap = st.snaps && st.snaps[rn];
       const w = (fin || []).find(Boolean);
       if (!snap || !snap.feat || !w || !snap.feat.some(([p]) => p === w)) continue;
-      rows.push({ feat: snap.feat, win: w });
+      // v22: pn + key let callers (trackPoolMerge) dedupe a local race already present in the shared pool
+      rows.push({ feat: snap.feat, win: w, pn: snap.pn, key: dateStr ? poolKeyFor(normKey(t), dateStr, +rn) : null });
     }
   }
   return rows;
@@ -1773,7 +1856,8 @@ function renderSettings() {
     <div class="row"><input id="emailTo" class="txt" type="email" multiple value="${esc(S.prefs.emailTo)}" placeholder="you@example.com, friend@example.com"><button class="btn" data-act="save-email">Save</button><span class="note" id="emailSaved"></span></div></div>
   <div class="panel" style="margin-top:12px"><h3>Morning line in the pick</h3>
     <div class="row"><div class="seg" role="group" aria-label="Morning line blend">${[[0, 'Off'], [20, 'Light'], [35, 'Normal'], [50, 'Heavy']].map(([v, l]) => `<button data-blend="${v}" class="${(S.prefs.mlBlend ?? 35) === v ? 'on' : ''}">${l}${v ? ` ${v}%` : ''}</button>`).join('')}</div></div>
-    <p class="note">The line-maker sees things the past lines don't, so the ranking and the bets blend our numbers with the morning line. <b>Our line</b> and the Good / Bad value calls always stay our numbers alone — that's what makes them a second opinion.</p></div>
+    <p class="note">The line-maker sees things the past lines don't, so the ranking and the bets blend our numbers with the morning line. <b>Our line</b> and the Good / Bad value calls always stay our numbers alone — that's what makes them a second opinion.</p>
+    <label class="row note" style="margin-top:10px"><input type="checkbox" data-act="toggle-livedrift" ${S.prefs.liveDrift === false ? '' : 'checked'}> Flag live-odds movement as a pro/con — once you've typed live odds in twice for a horse, a real drift from the first reading to the latest shows up as "Drifting" or "Taking money". Only shows up for a race once you've actually entered live odds there.</label></div>
   <div style="margin-top:12px">${learningHtml()}</div>
   <div style="margin-top:12px">${methodHtml()}</div>`;
 }
@@ -2138,7 +2222,7 @@ document.addEventListener('click', (e) => {
     for (const x of P.inn) { if (!x.pl) continue; const p = S.st.played[x.rn] = S.st.played[x.rn] || {}; if (x.pl === 'ls') p.ls = [...new Set([...(p.ls || []), x.lskey])]; else p[x.pl] = true; k++; }
     saveState(); S.prefs.slipOpen = true; render(); const m = $('#planMsg'); if (m) m.textContent = `Marked ${k} bets as played.`; return;
   }
-  if (act === 'live-clear') { if (S.st.live) delete S.st.live[+t.dataset.n]; saveState(); rescoreAll(); render(); return; }
+  if (act === 'live-clear') { const n = +t.dataset.n; if (S.st.live) delete S.st.live[n]; if (S.st.liveOpen) delete S.st.liveOpen[n]; saveState(); rescoreAll(); render(); return; }
   if (t.dataset.blend !== undefined) { S.prefs.mlBlend = +t.dataset.blend; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
   if (t.dataset.themeset !== undefined) { S.prefs.theme = t.dataset.themeset; LS.set(PREF_KEY, S.prefs); applyTheme(); render(); return; }
   if (act === 'learn-use') { S.prefs.learnUse = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
@@ -2146,6 +2230,7 @@ document.addEventListener('click', (e) => {
   if (act === 'learn-now') { runLearning(); return; }
   if (act === 'toggle-base') { S.prefs.baseAuto = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
   if (act === 'toggle-season') { S.prefs.season = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
+  if (act === 'toggle-livedrift') { S.prefs.liveDrift = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
   if (act === 'adv') { S.advOpen = !t.closest('details').open; return; }
   if (t.dataset.cbudget) { S.prefs.cardBudget = +t.dataset.cbudget; LS.set(PREF_KEY, S.prefs); render(); return; }
   if (t.dataset.cond) {
@@ -2304,6 +2389,11 @@ document.addEventListener('change', async (e) => {
     S.st.live = S.st.live || {}; const lv = S.st.live[n] = S.st.live[n] || {};
     if (v == null) delete lv[t.dataset.pgm]; else lv[t.dataset.pgm] = v;
     if (!Object.keys(lv).length) delete S.st.live[n];
+    // v22 (#52): remember the FIRST live-odds reading per horse (powers the opt-in drift pro/con) — set once
+    // and left alone on later edits; cleared together with the current value so a new run starts a fresh baseline.
+    S.st.liveOpen = S.st.liveOpen || {}; const lo = S.st.liveOpen[n] = S.st.liveOpen[n] || {};
+    if (v == null) delete lo[t.dataset.pgm]; else if (lo[t.dataset.pgm] == null) lo[t.dataset.pgm] = v;
+    if (!Object.keys(lo).length) delete S.st.liveOpen[n];
     saveState();
     const r = raceOf(n); scoreOne(r); S.dirty = true;
     if ($('#raceTop')) { $('#raceTop').innerHTML = raceTopHtml(r); $('#raceBody').innerHTML = raceBodyHtml(r); }
@@ -2403,7 +2493,7 @@ function applyMult(m) {
   const pick = last && cards[last] ? last : keys[0];
   if (pick && getCard(pick)) openCard(pick, getCard(pick));
   render();
-  // catch up if results were entered since the last fit (or on another version)
-  const nRows = learnRows().length;
-  if (nRows && (!S.learned || S.learned.raw !== nRows || S.learned.v !== 1)) scheduleLearning(1500);
+  // catch up if results were entered since the last fit (or on another version); also always refreshes
+  // the shared pool (v22: post-index + cross-night Trends) even for a fresh card with 0 local results yet
+  scheduleLearning(1500);
 })();

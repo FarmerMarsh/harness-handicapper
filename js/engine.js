@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=22';
+import { fmtTime } from './parse.js?v=23';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -806,7 +806,7 @@ function postIndexSrc(race, h) {
   return { v: g, src: `typical ${SIZE_LABEL[race.track_size] || '⅝-mile'} post index` };
 }
 
-export function scoreRace(race, { today, year, mult, driverTable, scratched = [], sim = true, cond = 'fast', book = null, books = null, season = true, base = true, temp = 1, blend = ML_BLEND, live = null, drivers = null }) {
+export function scoreRace(race, { today, year, mult, driverTable, scratched = [], sim = true, cond = 'fast', book = null, books = null, season = true, base = true, temp = 1, blend = ML_BLEND, live = null, liveOpen = null, drivers = null }) {
   race.cond = cond;
   CUR_TEMP = TEMP * (temp || 1);
   race.temp = CUR_TEMP;
@@ -919,7 +919,8 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
   let ranked = [...hs].sort((a, b) => b.score - a.score);
   const ex = ranked.map((h) => Math.exp(h.score / CUR_TEMP));
   const tot = ex.reduce((a, b) => a + b, 0);
-  ranked.forEach((h, i) => { h.own_prob = ex[i] / tot; h.win_prob = h.own_prob; h.own_rank = i + 1; h.live_dec = live && live[h.pgm] != null ? +live[h.pgm] : null; });
+  ranked.forEach((h, i) => { h.own_prob = ex[i] / tot; h.win_prob = h.own_prob; h.own_rank = i + 1; h.live_dec = live && live[h.pgm] != null ? +live[h.pgm] : null;
+    h.live_open_dec = liveOpen && liveOpen[h.pgm] != null ? +liveOpen[h.pgm] : null; });
   // v17: blend our numbers with the public's (morning line, or live odds once you type them in)
   const anyLive = ranked.some((h) => h.live_dec != null);
   const mk0 = marketProbs(ranked);
@@ -1000,6 +1001,14 @@ export function shortName(n) {
 
 const f0 = (x) => pyRound(x).toFixed(0);
 const money = (x) => '$' + x.toLocaleString('en-US');
+// "X-to-1" display for a live-odds value, mirroring app.js's oddsStr() (kept local — engine.js has no
+// dependency on app.js) — used only by the live-odds-drift pro/con below.
+function oddsStr(x) {
+  if (x == null || !isFinite(x)) return '—';
+  if (x < 1) { for (const [a, b] of [[1, 9], [1, 5], [2, 5], [1, 2], [3, 5], [4, 5], [1, 1]]) if (x <= a / b + 0.05) return `${a}-${b}`; }
+  if (x >= 99) return '99-1+';
+  return x < 10 ? `${x.toFixed(1)}-1` : `${Math.round(x)}-1`;
+}
 
 function prosCons(h, hs, race, year) {
   const m = h.m, pros = [], cons = [];
@@ -1153,6 +1162,15 @@ function prosCons(h, hs, race, year) {
     else if (lg <= -1.5) C(`Fades late: ${lg.toFixed(1)} spots from 3/4 to finish`, lg <= -2.5 ? 3 : 2, 'Trip/Post');
   }
   if (h.equip_note) P(h.equip_note.charAt(0) + h.equip_note.slice(1).toLowerCase().replace('lasix', 'Lasix'), 1, 'Form');
+  // v22 (#52, opt-in, Marshall's lowest priority this round): once you've typed live odds in twice for the
+  // same horse, flag real drift between the first reading and the latest one — a market signal, not a
+  // handicapping stat, so it's its own category and only ever appears when you've actually engaged with live odds.
+  if (h.live_open_dec != null && h.live_dec != null && h.live_open_dec > 0 && h.live_dec !== h.live_open_dec) {
+    const ratio = h.live_dec / h.live_open_dec;
+    const was = oddsStr(h.live_open_dec), now = oddsStr(h.live_dec);
+    if (ratio >= 1.4) C(`Drifting: was ${was}, now ${now}`, ratio >= 2 ? 2 : 1, 'Market');
+    else if (ratio <= 1 / 1.4) P(`Taking money: was ${was}, now ${now}`, ratio <= 0.5 ? 2 : 1, 'Market');
+  }
   pros.sort((a, b) => b[1] - a[1]); cons.sort((a, b) => b[1] - a[1]);
   return [pros.slice(0, 4), cons.slice(0, 4)];
 }
