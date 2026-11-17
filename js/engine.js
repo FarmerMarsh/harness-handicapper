@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=14';
+import { fmtTime } from './parse.js?v=15';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -487,14 +487,12 @@ export function wagerBase(race, name) {
   return (m && baseValue(m[1])) || 1.0;
 }
 
-// Key when the top pick stands alone: 4/5+ confidence with a clear edge on the second choice,
-// or a big enough edge on his own.
-const keyWinner = (race) => {
-  const rk = race.ranked;
-  if (rk.length < 2) return false;
-  const p1 = rk[0].win_prob, ratio = p1 / rk[1].win_prob;
-  return (race.confidence >= 4 && p1 >= 0.22 && ratio >= 1.35) || (race.confidence >= 3 && p1 >= 0.26 && ratio >= 1.45);
-};
+// Marshall (Nov 16): key the top pick when he's over 25% to win, otherwise box the best picks.
+export const KEY_AT = 0.25;
+const keyWinner = (race) => race.ranked.length >= 2 && race.ranked[0].win_prob > KEY_AT;
+// confidence /5 for a ticket, from the model's chance it hits
+const starsFor = (hit, cuts) => 1 + cuts.filter((c) => hit >= c).length;
+const EX_CUTS = [0.065, 0.08, 0.10, 0.125], TRI_CUTS = [0.04, 0.05, 0.065, 0.085];
 
 // number of distinct tickets a set of legs covers (each finisher must be a different horse)
 export function countCombos(legs) {
@@ -526,21 +524,23 @@ function trifectaCall(race) {
   if (keyWinner(race) && rk.length >= 4) {
     const under = [pg(1), pg(2), pg(3)];
     const legs = [[pg(0)], under, under];
-    return { type: 'KEY', text: `#${pg(0)} over ${under.map((x) => '#' + x).join(', ')}`, legs, combos: 6, cost: 6 * base, hit: s.key_1_over_234, base, caution,
-      strength: `Winner ${pc(0)}% vs ${pc(1)}% / ${pc(2)}% for the next two — he stands alone, so use him on top only.` };
+    return { type: 'KEY', text: `#${pg(0)} over ${under.map((x) => '#' + x).join(', ')}`, legs, combos: 6, cost: 6 * base, hit: s.key_1_over_234, base, caution, conf: starsFor(s.key_1_over_234, TRI_CUTS),
+      strength: `Winner ${pc(0)}% to win (over 25%) — key him on top over the next three.` };
   }
   const top = [pg(0), pg(1), pg(2)];
-  return { type: 'BOX', text: top.map((x) => '#' + x).join('-'), legs: [top, top, top], combos: 6, cost: 6 * base, hit: s.box3, base, caution,
-    strength: `Top three ${pc(0)}% / ${pc(1)}% / ${pc(2)}% — too close to trust one on top, so box them.` };
+  return { type: 'BOX', text: top.map((x) => '#' + x).join('-'), legs: [top, top, top], combos: 6, cost: 6 * base, hit: s.box3, base, caution, conf: starsFor(s.box3, TRI_CUTS),
+    strength: `Top pick ${pc(0)}% to win (25% or less) — box the top three: ${pc(0)}% / ${pc(1)}% / ${pc(2)}%.` };
 }
 
 function exactaCall(race) {
   const rk = race.ranked, s = race.sim, base = wagerBase(race, 'EXACTA');
   const pg = (i) => rk[i].pgm;
-  if (base == null || rk.length < 3) return { type: 'N/A', text: 'not offered', combos: 0, cost: 0, hit: 0, base, legs: null };
-  if (race.trifecta.type === 'KEY') return { type: 'KEY', text: `#${pg(0)} over #${pg(1)}, #${pg(2)}`, legs: [[pg(0)], [pg(1), pg(2)]], combos: 2, cost: 2 * base, hit: s.ex_key_1_over_23, base };
+  // every race gets an exacta (Marshall, Nov 16); $1 when the program doesn't print a minimum
+  const b = base ?? 1;
+  if (rk.length < 3) return { type: 'N/A', text: 'field too small', combos: 0, cost: 0, hit: 0, base: b, legs: null };
+  if (race.trifecta.type === 'KEY') return { type: 'KEY', text: `#${pg(0)} over #${pg(1)}, #${pg(2)}`, legs: [[pg(0)], [pg(1), pg(2)]], combos: 2, cost: 2 * b, hit: s.ex_key_1_over_23, base: b, conf: starsFor(s.ex_key_1_over_23, EX_CUTS) };
   const t = [pg(0), pg(1)];   // Marshall: exacta box is always two horses
-  return { type: 'BOX', text: t.map((x) => '#' + x).join('-'), legs: [t, t], combos: 2, cost: 2 * base, hit: s.ex_box2, base };
+  return { type: 'BOX', text: t.map((x) => '#' + x).join('-'), legs: [t, t], combos: 2, cost: 2 * b, hit: s.ex_box2, base: b, conf: starsFor(s.ex_box2, EX_CUTS) };
 }
 
 function superfectaCall(race) {
@@ -600,69 +600,61 @@ function valueCall(race) {
   return { good: good.map((h) => h.pgm), bad: bad.map((h) => h.pgm) };
 }
 
+// Longshots (Marshall, Nov 16): 3 exactas + 3 trifectas per race, straight 50¢-style tickets built on
+// information. Every horse on a ticket has to be "live" — never a bad horse just for variety — and each
+// ticket needs a price horse (5-1+ on the morning line) the numbers like at least as much as the line does.
 function longshotCall(race) {
   const rk = race.ranked, s = race.sim, k = rk.length;
-  const base = wagerBase(race, 'TRIFECTA') ?? 1.0;
   if (k < 4 || rk[0].ml_prob == null) return [];
   const q = rk.map((h) => h.ml_prob);
-  const hv = (a, b, c) => q[a] * (q[b] / (1 - q[a])) * (q[c] / (1 - q[a] - q[b]));
+  const liveN = Math.max(4, Math.ceil(k * 0.6));
+  const live = (i) => i < liveN && rk[i].win_prob >= 0.05 && rk[i].value !== 'bad';
+  const price = (i) => live(i) && rk[i].ml_dec != null && rk[i].ml_dec >= 5 && (rk[i].value === 'good' || rk[i].ml_dec >= 0.9 * rk[i].line_dec);
   const idx = rk.map((h, i) => i);
-  // longshot pool: good-value horses, else live prices the numbers like better than the morning line
-  let pool = idx.filter((i) => rk[i].value === 'good');
-  if (!pool.length) pool = idx.filter((i) => rk[i].ml_dec >= 6 && rk[i].ml_dec >= 1.4 * rk[i].line_dec && rk[i].win_prob >= 0.05);
-  if (!pool.length) pool = idx.filter((i) => i > 0 && rk[i].ml_dec >= 4 && rk[i].ml_dec >= 1.15 * rk[i].line_dec && rk[i].win_prob >= 0.08)
-    .sort((x, y) => (rk[y].ml_dec / rk[y].line_dec) - (rk[x].ml_dec / rk[x].line_dec)).slice(0, 1);
-  if (!pool.length) return [];
-  const inPool = (i) => pool.includes(i);
-  const mainLegs = race.trifecta.legs ? race.trifecta.legs.map((l) => l.map((p) => rk.findIndex((h) => h.pgm === p))) : null;
-  const inMain = (a, b, c) => !!mainLegs && mainLegs[0].includes(a) && mainLegs[1].includes(b) && mainLegs[2].includes(c);
-  const used = new Set();
+  if (!idx.some(price)) return [];
+  const ex = (a, b) => { let t = 0; for (let c = 0; c < k; c++) if (c !== a && c !== b) t += s.tri(a, b, c); return t; };
+  const mEx = (a, b) => q[a] * (q[b] / (1 - q[a]));
+  const mTri = (a, b, c) => mEx(a, b) * (q[c] / (1 - q[a] - q[b]));
+  const inLegs = (legs, arr) => !!legs && legs.length === arr.length && legs.every((l, i) => l.includes(rk[arr[i]].pgm));
   const out = [];
-  const key3 = (a, b, c) => `${a}.${b}.${c}`;
-  const addTicket = (idxLegs, label, kindName) => {
-    let p = 0, m = 0, combos = 0;
-    const walk = (i, u) => {
-      if (i === 3) { p += s.tri(u[0], u[1], u[2]); m += hv(u[0], u[1], u[2]); combos++; used.add(key3(...u)); return; }
-      for (const x of idxLegs[i]) if (!u.includes(x)) walk(i + 1, [...u, x]);
-    };
-    walk(0, []);
-    const legs = idxLegs.map((l) => l.map((i) => rk[i].pgm));
-    out.push({ legs, text: legsText(legs), combos, cost: combos * base, base, hit: p, market: m, overlay: m ? p / m : null, label, kind: kindName,
-      value: [...new Set(idxLegs.flat())].filter(inPool).map((i) => rk[i].pgm) });
+  const pick = (cands, bet, base, mainLegs) => {
+    cands = cands.filter((c) => !inLegs(mainLegs, c.t)).sort((a, b) => b.sc - a.sc);
+    const chosen = [], shape = new Set(), topCount = {};
+    for (const pass of [0, 1]) for (const c of cands) {
+      if (chosen.length >= 3) break;
+      if (chosen.includes(c)) continue;
+      const sig = c.t.map((i) => (price(i) ? 'P' : 'x')).join('');           // where the price horses finish
+      const tc = topCount[c.t[0]] || 0;
+      if (pass === 0 && (shape.has(sig) || tc >= 1)) continue;                 // first pass: mix shapes and winners
+      if (pass === 1 && tc >= 2) continue;
+      shape.add(sig); topCount[c.t[0]] = tc + 1; chosen.push(c);
+    }
+    for (const c of chosen) {
+      const legs = c.t.map((i) => [rk[i].pgm]);
+      const pr = c.t.filter(price).map((i) => rk[i].pgm);
+      out.push({ bet, legs, text: legsText(legs), combos: 1, cost: base, base, hit: c.p, market: c.m, overlay: c.m ? c.p / c.m : null,
+        label: `price horse${pr.length > 1 ? 's' : ''} #${pr.join(', #')}`, kind: bet === 'ex' ? 'exacta' : 'straight', value: pr });
+    }
   };
-  // 1) keyed ticket around the best value horse
-  const v = pool[0];
-  const [a, b] = idx.filter((i) => i !== v).slice(0, 2);
-  if (rk[v].win_prob >= 0.10) addTicket([[v], [a, b], [a, b]], `#${rk[v].pgm} on top`, 'top');
-  else addTicket([[a, b], [a, b], [v]], `#${rk[v].pgm} to run third`, 'third');
-  // 2-3) best-overlay straight tickets that use a value horse and would pay well
-  const cands = [];
-  for (let x = 0; x < k; x++) for (let y = 0; y < k; y++) for (let z = 0; z < k; z++) {
-    if (x === y || y === z || x === z) continue;
-    if (!(inPool(x) || inPool(y) || inPool(z))) continue;
-    if (inMain(x, y, z)) continue;
-    const p = s.tri(x, y, z);
-    if (p < 0.008) continue;
-    const m = hv(x, y, z);
-    if (1 / m < 50) continue;
-    cands.push({ x, y, z, p, ov: p / m });
+  // exactas
+  const exC = [];
+  for (const a of idx) for (const b of idx) {
+    if (a === b || !live(a) || !live(b) || !(price(a) || price(b))) continue;
+    const p = ex(a, b), m = mEx(a, b);
+    if (p < 0.015 || 1 / m < 12) continue;
+    exC.push({ t: [a, b], p, m, sc: (p / m) * Math.sqrt(p) });
   }
-  cands.sort((m1, m2) => m2.ov - m1.ov);
-  const spots = new Set();
-  for (const t of cands) {
-    if (out.length >= 3) break;
-    if (used.has(key3(t.x, t.y, t.z))) continue;
-    const spot = [t.x, t.y, t.z].findIndex(inPool);       // vary where the value horse finishes
-    if (spots.has(spot) && cands.some((c) => !used.has(key3(c.x, c.y, c.z)) && !spots.has([c.x, c.y, c.z].findIndex(inPool)) && c.ov >= t.ov * 0.75)) continue;
-    spots.add(spot);
-    addTicket([[t.x], [t.y], [t.z]], 'straight', 'straight');
+  pick(exC, 'ex', wagerBase(race, 'EXACTA') ?? 1, race.exacta && race.exacta.legs);
+  // trifectas
+  const triC = [];
+  for (const a of idx) for (const b of idx) for (const c of idx) {
+    if (a === b || b === c || a === c || !live(a) || !live(b) || !live(c) || !(price(a) || price(b) || price(c))) continue;
+    const p = s.tri(a, b, c), m = mTri(a, b, c);
+    if (p < 0.004 || 1 / m < 30) continue;
+    triC.push({ t: [a, b, c], p, m, sc: (p / m) * Math.sqrt(p) });
   }
-  // a second value horse gets its own keyed ticket if there's room
-  if (out.length < 3 && pool.length > 1) {
-    const v2 = pool[1]; const [c, d] = idx.filter((i) => i !== v2).slice(0, 2);
-    addTicket(rk[v2].win_prob >= 0.10 ? [[v2], [c, d], [c, d]] : [[c, d], [c, d], [v2]], rk[v2].win_prob >= 0.10 ? `#${rk[v2].pgm} on top` : `#${rk[v2].pgm} to run third`, rk[v2].win_prob >= 0.10 ? 'top' : 'third');
-  }
-  return out.slice(0, 3);
+  pick(triC, 'tri', wagerBase(race, 'TRIFECTA') ?? 1.0, race.trifecta && race.trifecta.legs);
+  return out;
 }
 
 // Multi-race wagers listed in the program header, e.g. "50 CENT PICK 4 (1-2-3-4)".

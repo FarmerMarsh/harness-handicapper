@@ -446,3 +446,15 @@ table.tracks select { max-width: 220px; }
 .learnp h4 { margin: 10px 0 4px; font-size: 13px; color: var(--navy); }
 .learnp p { margin: 4px 0; }
 .learnp details { margin: 6px 0; }
+
+/* v15: four-band highlights, rated exacta + trifecta, longshot groups */
+.hv.best { background: #19c35a; color: #05361a; font-weight: 800; }
+.hv.mid { background: #ffe680; color: #5a4300; font-weight: 700; }
+.hv.worst { background: #f7b4ab; color: #7d130b; font-weight: 700; }
+.playrow { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px dashed rgba(0,0,0,.12); }
+.pl-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.pl-c { white-space: nowrap; font-size: 13px; }
+.stars.sm { font-size: 13px; letter-spacing: 1px; color: #e09b00; }
+.lsgrp { margin-top: 4px; }
+.lsgrp .lbl2 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.lsgrp ul { margin: 2px 0 4px; }

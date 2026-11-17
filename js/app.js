@@ -1,11 +1,11 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=14';
+import { parseProgram, fmtTime } from './parse.js?v=15';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=14';
-import { learnAll, learnedMult } from './learn.js?v=14';
+} from './engine.js?v=15';
+import { learnAll, learnedMult } from './learn.js?v=15';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -429,7 +429,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=14', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=15', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -592,7 +592,7 @@ function snapshot(r) {
     v: 2,
     order: r.ranked.map((h) => h.pgm), conf: r.confidence, under: r.undercard,
     plays: { exacta: playOf(r.exacta), trifecta: playOf(r.trifecta), superfecta: playOf(r.superfecta) },
-    longshots: (r.longshots || []).map((l) => ({ legs: l.legs, text: l.text, cost: l.cost, kind: l.kind })),
+    longshots: (r.longshots || []).map((l) => ({ legs: l.legs, text: l.text, cost: l.cost, kind: l.kind, bet: l.bet })),
     value: { good: [...(r.value?.good || [])], bad: [...(r.value?.bad || [])] },
     vdet: r.ranked.filter((h) => h.value).map((h) => [h.pgm, h.value, h.ml_prob ?? null, h.win_prob, h.ml, h.line]),
     feat: r.ranked.map((h) => [h.pgm, h.feat]),
@@ -664,23 +664,28 @@ function highlights(r) {
     const vals = act.map((h) => [h.pgm, f(h.m, h)]).filter(([, v]) => v != null && isFinite(v)).map(([p, v]) => [p, Math.round(v * 100) / 100]);
     if (vals.length < 3) continue;
     const nums = vals.map(([, v]) => v);
-    const hi = Math.max(...nums), lo = Math.min(...nums);
-    if (hi === lo) continue;
-    const best = dir > 0 ? hi : lo, worst = dir > 0 ? lo : hi;
-    out[key] = { best: new Set(vals.filter(([, v]) => v === best).map(([p]) => p)), worst: new Set(vals.filter(([, v]) => v === worst).map(([p]) => p)) };
+    if (Math.max(...nums) === Math.min(...nums)) continue;
+    // Marshall (Nov 16): best = bright green, next 3 = yellow, next 2 = plain, the rest = red. Ties share a band.
+    const m = new Map();
+    for (const [p, v] of vals) {
+      const ahead = nums.filter((x) => (dir > 0 ? x > v : x < v)).length;
+      m.set(p, ahead === 0 ? 'best' : ahead <= 3 ? 'mid' : ahead <= 5 ? '' : 'worst');
+    }
+    out[key] = m;
   }
   return out;
 }
-const hlClass = (hl, key, pgm) => (!hl || !hl[key] ? '' : hl[key].best.has(pgm) ? 'best' : hl[key].worst.has(pgm) ? 'worst' : '');
+const hlClass = (hl, key, pgm) => (!hl || !hl[key] ? '' : hl[key].get(pgm) || '');
 const hv = (cls, html) => (cls ? `<span class="hv ${cls}">${html}</span>` : html);
 
 // ---------------- render: card ----------------
 function racePlaysHtml(r) {
   const t = r.trifecta;
-  const bits = [`<span class="pill ${kind(t)}">TRI ${t.type === 'N/A' ? 'n/a' : esc(t.type.toLowerCase() + ' ' + t.text)}</span>`];
+  const bits = [`<span class="pill ${kind(t)}">TRI ${t.type === 'N/A' ? 'n/a' : esc(t.type.toLowerCase() + ' ' + t.text)}${t.conf ? ` · ${t.conf}/5` : ''}</span>`];
+  if (r.exacta.conf) bits.push(`<span class="pill ${kind(t)}">EX ${esc(r.exacta.type.toLowerCase() + ' ' + r.exacta.text)} · ${r.exacta.conf}/5</span>`);
   for (const p of r.value.good.slice(0, 2)) bits.push(`<span class="pill value">Value #${p} (${esc(horseOf(r, p).ml)})</span>`);
   for (const p of r.value.bad.slice(0, 1)) bits.push(`<span class="pill badv">Bad value #${p} (${esc(horseOf(r, p).ml)})</span>`);
-  if (r.longshots.length) bits.push(`<span class="pill">${r.longshots.length} longshot tri${r.longshots.length > 1 ? 's' : ''}</span>`);
+  if (r.longshots.length) bits.push(`<span class="pill">${r.longshots.length} longshot${r.longshots.length > 1 ? 's' : ''}</span>`);
   return bits.join('');
 }
 
@@ -730,12 +735,12 @@ function summaryCard() {
     ${P.out.length ? `<p class="note faint">Left out: ${P.out.map((x) => `${esc(x.label)} ${dollars(x.cost)}`).join(' · ')}</p>` : ''}</div>`;
   return `<section class="panel summary" aria-label="Card summary"><div class="sum-head"><h2>Summary</h2><span class="note">${esc(weightsText(effMult()))}</span></div>${planBox}<div class="sgrid">
     ${box('Best bets', ol(H.best.map((r) => { const h = r.ranked[0]; return `<li>${lnk(r.number, `<b>R${r.number} #${h.pgm} ${esc(tc(h.name))}</b>`)} <span class="muted">ML ${esc(h.ml)} · line ${esc(h.line)} · ${r.confidence}/5</span></li>`; })))}
-    ${box('Best trifectas', ol(H.tris.map((r) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(tc(r.trifecta.type))} ${esc(r.trifecta.text)}</b>`)} <span class="muted">${dollars(r.trifecta.cost)} · ~${Math.round(r.trifecta.hit * 100)}%</span></li>`)))}
-    ${box('Best exactas', ol(H.exs.map((r) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(tc(r.exacta.type))} ${esc(r.exacta.text)}</b>`)} <span class="muted">${dollars(r.exacta.cost)} · ~${Math.round(r.exacta.hit * 100)}%</span></li>`)))}
+    ${box('Best trifectas', ol(H.tris.map((r) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(tc(r.trifecta.type))} ${esc(r.trifecta.text)}</b>`)} <span class="muted">${r.trifecta.conf}/5 · ${dollars(r.trifecta.cost)} · ~${Math.round(r.trifecta.hit * 100)}%</span></li>`)))}
+    ${box('Best exactas', ol(H.exs.map((r) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(tc(r.exacta.type))} ${esc(r.exacta.text)}</b>`)} <span class="muted">${r.exacta.conf}/5 · ${dollars(r.exacta.cost)} · ~${Math.round(r.exacta.hit * 100)}%</span></li>`)))}
     ${box('Superfectas', ol(H.sups.map((r) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(tc(r.superfecta.type))} ${esc(r.superfecta.text)}</b>`)} <span class="muted">${dollars(r.superfecta.cost)} · ~${Math.round(r.superfecta.hit * 100)}%</span></li>`)))}
     ${box('<span class="gv">Good value</span> <span class="muted">ML → our line</span>', ol(H.good.slice(0, 6).map(({ r, h }) => `<li>${lnk(r.number, `<b>R${r.number} #${h.pgm} ${esc(tc(h.name))}</b>`)} ${esc(h.ml.replace('/', '-'))} → <b>${esc(h.line)}</b></li>`)))}
     ${box('<span class="bv">Bad value</span> <span class="muted">bet against</span>', ol(H.bad.slice(0, 6).map(({ r, h }) => `<li>${lnk(r.number, `<b>R${r.number} #${h.pgm} ${esc(tc(h.name))}</b>`)} ${esc(h.ml.replace('/', '-'))} → <b>${esc(h.line)}</b></li>`)))}
-    ${box('Longshot trifectas', ol(H.longs.slice(0, 6).map(({ r, l }) => `<li>${lnk(r.number, `<b>R${r.number} ${esc(l.text)}</b>`)} <span class="muted">${dollars(l.cost)} · ${esc(l.label)}</span></li>`)))}
+    ${box('Longshots', ol(H.longs.slice(0, 6).map(({ r, l }) => `<li>${lnk(r.number, `<b>R${r.number} ${l.bet === 'ex' ? 'Ex' : 'Tri'} ${esc(l.text)}</b>`)} <span class="muted">${dollars(l.cost)} · ${esc(l.label)}</span></li>`)))}
     ${box('Pick 3 / 4 / 5 &amp; doubles', H.plans.length ? `<ul class="plain">${H.plans.map(({ b, t, alt }) => `<li>${t.verdict === 'PLAY' ? '<b class="gv">PLAY</b>' : '<span class="muted">PASS</span>'} <a href="#/picks">${esc(b.name)} R${b.races[0]}–${b.races[b.races.length - 1]}</a>${t.verdict === 'PLAY' ? ` ${ticketLine(t)} = <b>${dollars(t.cost)}</b>` : alt ? ` <span class="muted">· plays at $10</span>` : ''}</li>`).join('')}</ul>` : '<p class="note">No multi-race wagers on this card.</p>')}
   </div></section>`;
 }
@@ -869,13 +874,16 @@ function projHtml(r) {
 
 function triTile(r) {
   const t = r.trifecta, ex = r.exacta, su = r.superfecta;
-  const one = (x) => (x.type === 'N/A' ? 'not offered' : x.type === 'PASS' ? 'pass' : `${esc(tc(x.type))} ${esc(x.text)} <span class="faint">(${dollars(x.cost)})</span>`);
-  if (t.type === 'N/A') return `<div class="bet"><div class="lbl">TRIFECTA</div><div class="call faint">Field too small</div></div>`;
-  return `<div class="bet ${kind(t)} main"><div class="lbl">TRIFECTA — ${t.type === 'KEY' ? 'KEY IT' : 'BOX IT'}</div>
-    <div class="call">${t.type === 'KEY' ? 'Key' : 'Box'} ${esc(t.text)}</div>
-    <div class="det">${esc(t.strength)}</div>
-    <div class="det">${t.combos} combos · ${dollars(t.cost)} at ${baseLabel(t.base)} · model hit ~${Math.round(t.hit * 100)}%${t.caution ? ' · <b class="no">low-confidence race — go light</b>' : ''}</div>
-    <div class="exsup"><b>Exacta</b> ${one(ex)} &nbsp;·&nbsp; <b>Super</b> ${one(su)}</div></div>`;
+  if (t.type === 'N/A') return `<div class="bet"><div class="lbl">EXACTA &amp; TRIFECTA</div><div class="call faint">Field too small</div></div>`;
+  const st = (x) => (x.conf ? `<span class="stars sm">${stars(x.conf)}</span> <b>${x.conf}/5</b>` : '');
+  const line = (name, x) => `<div class="playrow"><div class="pl-h"><span class="lbl">${name} — ${x.type === 'KEY' ? 'KEY' : 'BOX'}</span><span class="pl-c">${st(x)}</span></div>
+    <div class="call">${x.type === 'KEY' ? 'Key' : 'Box'} ${esc(x.text)}</div>
+    <div class="det">${x.combos} combos · ${dollars(x.cost)} at ${baseLabel(x.base)} · model hit ~${Math.round(x.hit * 100)}%</div></div>`;
+  return `<div class="bet ${kind(t)} main">
+    ${ex.type === 'N/A' ? '' : line('EXACTA', ex)}
+    ${line('TRIFECTA', t)}
+    <div class="det">${esc(t.strength)}${t.caution ? ' <b class="no">Low-confidence race — go light.</b>' : ''}</div>
+    ${su.type === 'KEY' ? `<div class="exsup"><b>Super</b> Key ${esc(su.text)} <span class="faint">(${dollars(su.cost)})</span></div>` : ''}</div>`;
 }
 function valueTile(r) {
   const line = (p, good) => {
@@ -890,9 +898,12 @@ function valueTile(r) {
 }
 function longTile(r) {
   const L = r.longshots;
-  return `<div class="bet longbox"><div class="lbl">LONGSHOT TRIFECTAS</div>
-    ${L.length ? `<ul>${L.map((l) => `<li><b>${esc(l.text)}</b> <span class="faint">${l.combos} combo${l.combos > 1 ? 's' : ''} · ${dollars(l.cost)}</span><br><span class="det">${esc(l.label === 'straight' ? 'straight' : l.label)} · model ${pctP(l.hit, 1)} vs ML ${pctP(l.market, l.market < 0.01 ? 2 : 1)}</span></li>`).join('')}</ul>`
-    : '<div class="det">No overpriced horses to build longshot tickets around.</div>'}</div>`;
+  const list = (bet, name) => {
+    const x = L.filter((l) => (l.bet || 'tri') === bet);
+    return x.length ? `<div class="lsgrp"><span class="lbl2">${name}</span><ul>${x.map((l) => `<li><b>${esc(l.text)}</b> <span class="faint">${dollars(l.cost)}</span> <span class="det">· model ${pctP(l.hit, 1)} vs ML ${pctP(l.market, l.market < 0.01 ? 2 : 1)} · ${esc(l.label)}</span></li>`).join('')}</ul></div>` : '';
+  };
+  return `<div class="bet longbox"><div class="lbl">LONGSHOTS — STRAIGHT TICKETS</div>
+    ${L.length ? list('ex', 'Exactas') + list('tri', 'Trifectas') : '<div class="det">No live price horses to build longshot tickets around — nothing forced.</div>'}</div>`;
 }
 function betsHtml(r) {
   return `<div class="bets">${triTile(r)}${valueTile(r)}${longTile(r)}</div>`;
@@ -939,7 +950,7 @@ function raceBodyHtml(r) {
   const v = S.prefs.view;
   return `<div class="toolbar">
     <div class="seg" role="group" aria-label="Sort horses"><button data-sort="pgm" class="${S.prefs.sort === 'pgm' ? 'on' : ''}">Program #</button><button data-sort="proj" class="${S.prefs.sort === 'proj' ? 'on' : ''}">Projected</button></div>
-    <span class="legend"><span class="hv best">best</span> <span class="hv worst">worst</span> in this race</span>
+    <span class="legend"><span class="hv best">best</span> <span class="hv mid">next 3</span> <span class="hv">next 2</span> <span class="hv worst">the rest</span> in each column</span>
     <div class="seg" role="group" aria-label="Layout"><button data-view="auto" class="${v === 'auto' ? 'on' : ''}">Auto</button><button data-view="cards" class="${v === 'cards' ? 'on' : ''}">Cards</button><button data-view="table" class="${v === 'table' ? 'on' : ''}">Table</button></div>
   </div>
   <div class="horses hview-cards ${v === 'auto' ? 'auto' : v === 'cards' ? 'force' : 'hide'}">${sorted.map((h) => horseCard(h, r, scrSet.has(h.pgm), hl)).join('')}</div>
@@ -1087,7 +1098,7 @@ function summarize(rows) {
     plays[k] = { n: g.length, hit: g.filter((x) => x[k]).length, cost: g.reduce((a, x) => a + x[k + '_cost'], 0) };
   }
   const ls = {};
-  for (const kind of ['top', 'third', 'straight']) {
+  for (const kind of ['exacta', 'top', 'third', 'straight']) {
     const t = rows.flatMap((x) => (x.lsT || []).filter((y) => y.kind === kind));
     ls[kind] = { n: t.length, hit: t.filter((y) => y.hit).length, cost: t.reduce((a, y) => a + y.cost, 0) };
   }
@@ -1098,21 +1109,21 @@ function summarize(rows) {
   };
   return { by, plays, ls, val, n: rows.length, w: rows.filter((x) => x.win).length };
 }
-const LS_LABEL = { top: 'Value horse on top', third: 'Value horse to run 3rd', straight: 'Straight tickets' };
+const LS_LABEL = { exacta: 'Longshot exactas', top: 'Value horse on top (older cards)', third: 'Value horse to run 3rd (older cards)', straight: 'Longshot trifectas' };
 function recordTables(sum, rows) {
   const conf = Object.entries(sum.by).sort((a, b) => b[0] - a[0]).map(([c, v]) => `<tr><td><span class="stars">${stars(+c)}</span> ${c}/5</td><td>${v.w}/${v.n}</td><td>${Math.round((100 * v.w) / v.n)}%</td><td>${v.itm}/${v.n}</td></tr>`).join('');
   const label = { exacta: 'Exacta', trifecta: 'Trifecta', superfecta: 'Superfecta' };
   const plays = Object.entries(sum.plays).map(([k, v]) => `<tr><td>${label[k]}</td><td>${v.hit}/${v.n}</td><td>${v.n ? Math.round((100 * v.hit) / v.n) + '%' : '—'}</td><td>${dollars(v.cost)}</td></tr>`).join('');
   const lsAll = Object.values(sum.ls).reduce((a, v) => ({ n: a.n + v.n, hit: a.hit + v.hit, cost: a.cost + v.cost }), { n: 0, hit: 0, cost: 0 });
   const lsRows = Object.entries(sum.ls).map(([k, v]) => `<tr><td>${LS_LABEL[k]}</td><td>${v.hit}/${v.n}</td><td>${v.n ? Math.round((100 * v.hit) / v.n) + '%' : '—'}</td><td>${dollars(v.cost)}</td></tr>`).join('')
-    + `<tr class="tot"><td>All longshot tris</td><td>${lsAll.hit}/${lsAll.n}</td><td>${lsAll.n ? Math.round((100 * lsAll.hit) / lsAll.n) + '%' : '—'}</td><td>${dollars(lsAll.cost)}</td></tr>`;
+    + `<tr class="tot"><td>All longshots</td><td>${lsAll.hit}/${lsAll.n}</td><td>${lsAll.n ? Math.round((100 * lsAll.hit) / lsAll.n) + '%' : '—'}</td><td>${dollars(lsAll.cost)}</td></tr>`;
   const vr = (lbl, v, cls) => `<tr><td><span class="${cls}">${lbl}</span></td><td>${v.n}</td><td>${v.w}</td><td>${v.mlexp ? v.mlexp.toFixed(1) : '—'}</td><td>${v.itm} (${v.n ? Math.round((100 * v.itm) / v.n) : 0}%)</td></tr>`;
   const tix = (rows || []).flatMap((x) => (x.lsT || []).map((y) => ({ race: x.race, ...y })));
   return `<div class="grid2">
     <div class="panel"><h3>Winners by confidence</h3><table class="rec"><thead><tr><th>Confidence</th><th>Won</th><th>Win %</th><th>In the money</th></tr></thead><tbody>${conf || '<tr><td colspan="4" class="muted">No graded races yet</td></tr>'}</tbody></table></div>
     <div class="panel"><h3>Main plays</h3><table class="rec"><thead><tr><th>Bet</th><th>Hit</th><th>Hit %</th><th>Wagered</th></tr></thead><tbody>${plays}</tbody></table>
       <p class="note">Wagered is at the program's base amount. Payouts aren't tracked.</p></div>
-    <div class="panel"><h3>Longshot trifectas</h3><table class="rec"><thead><tr><th>Type</th><th>Hit</th><th>Hit %</th><th>Wagered</th></tr></thead><tbody>${lsRows}</tbody></table>
+    <div class="panel"><h3>Longshots</h3><table class="rec"><thead><tr><th>Type</th><th>Hit</th><th>Hit %</th><th>Wagered</th></tr></thead><tbody>${lsRows}</tbody></table>
       ${tix.length ? `<details><summary class="note">Every graded longshot ticket (${tix.length})</summary><table class="rec small"><tbody>${tix.map((y) => `<tr><td>R${y.race}</td><td><b>${esc(y.text)}</b></td><td class="muted">${LS_LABEL[y.kind]}</td><td>${dollars(y.cost)}</td><td>${y.hit ? '<span class="ok">hit</span>' : '<span class="no">miss</span>'}</td></tr>`).join('')}</tbody></table></details>` : ''}</div>
     <div class="panel"><h3>Value horses</h3><table class="rec"><thead><tr><th>Flag</th><th>Horses</th><th>Won</th><th>ML says</th><th>In the money</th></tr></thead><tbody>${vr('Good value', sum.val.good, 'gv')}${vr('Bad value', sum.val.bad, 'bv')}</tbody></table>
       <p class="note"><b>ML says</b> = how many wins the morning line expects from those horses. Good value is working when <b>Won</b> beats it; bad value is working when <b>Won</b> falls short of it.</p></div></div>`;
@@ -1290,7 +1301,8 @@ function methodHtml() {
   <p><b>Class</b>: average class rating of the last 3 races versus today's, plus a circuit adjustment for shippers (Yonkers, the Meadowlands and Mohawk tougher; Vernon, Tioga, fairs softer).</p>
   <p><b>Added points</b>: lone speed +${ADJ.lone_speed}, closer with a hot pace +${ADJ.closer_setup}, driver upgrade +${ADJ.driver_up}/+${ADJ.driver_up_big}, tough trip that still finished close +${ADJ.tough_trip} each (max +${ADJ.tough_trip_cap}); speed duel ${ADJ.speed_duel}, driver downgrade ${ADJ.driver_down}. Penalties for breaks, layoffs, stale form and thin data.</p>
   <p><b>Winner confidence</b> blends the top pick's points margin with data quality. <b>Undercard</b> rates how often the projected 2nd–5th finish within one spot of projection in 40,000 simulated races.</p>
-  <p><b>Trifecta call</b>: KEY the top pick over the next three when he stands alone (4/5 confidence, 22%+ to win and 1.35× the second choice — or 3/5+, 26%+ and 1.45×); otherwise BOX the top three. Exacta follows the same call but always uses two horses (key over the next two, or box the top two); superfecta is only played when the trifecta is a KEY and the undercard is 3/5+ — the top pick over the next three, 6 combos, so it stays cheap; otherwise pass.</p>
+  <p><b>Exacta &amp; trifecta</b>: every race gets both. If the top pick is over 25% to win, KEY him — exacta over the next two, trifecta over the next three. Otherwise BOX — exacta the top two, trifecta the top three. Each ticket is rated out of 5 from the model's chance it hits (exacta 6.5% / 8% / 10% / 12.5% for 2–5 stars; trifecta 4% / 5% / 6.5% / 8.5%). A superfecta shows only when the trifecta is a key and the undercard is 3/5+.</p>
+  <p><b>Longshots</b>: up to 3 straight exactas and 3 straight trifectas per race. Every horse on a ticket has to be live (top 60% of the field by our ranking, 5%+ to win, not flagged bad value), and each ticket needs a price horse — 5-1 or longer on the morning line that the numbers like at least as much as the line. Tickets are mixed (different winners, price horse in different spots) but never padded with a weak horse; if a race has no live price horse it gets none.</p>
   <p><b>Value</b> (morning line vs our line): <span class="gv">good value</span> = ML at least 1.75× our line and 2+ points longer (ML 10-1, our line 5-1). <span class="bv">Bad value</span> = our line at least 2× the ML and 2+ points longer, on horses 8-1 or shorter (ML 5-1, our line 10-1). <b>Longshot trifectas</b> are built around the good-value horses: the tickets the model gives a real chance that the morning line prices much lower (model % vs ML %).</p>
   <p><b>Multi-race tickets</b> single a horse when he's 5/5 and 35%+ (or clears the style's coverage alone) and otherwise add horses in projected order until the leg covers 45% (tight), 60% (balanced) or 75% (wide) of the model's win chance.</p>
   <p><b>Opening speed</b> combines average position at the first quarter with the estimated opening-quarter time. Season and lifetime marks are shown but no longer scored — recent races say more.</p>
@@ -1399,7 +1411,7 @@ function cardPlan(races, longs, plans) {
     if (ok(r.exacta)) items.push({ id: 'ex:' + r.number, kind: 'Ex', rn: r.number, label: `R${r.number} Ex ${tc(r.exacta.type)}`, text: r.exacta.text, cost: r.exacta.cost, tier: light ? 6 : strong ? 2 : 4, sc: rs });
     if (ok(r.superfecta)) items.push({ id: 'sup:' + r.number, kind: 'Super', rn: r.number, label: `R${r.number} Super ${tc(r.superfecta.type)}`, text: r.superfecta.text, cost: r.superfecta.cost, tier: 5, sc: r.superfecta.hit / r.superfecta.cost });
   }
-  longs.forEach(({ r, l }, i) => items.push({ id: `ls:${r.number}:${i}`, kind: 'Longshot', rn: r.number, label: `R${r.number} Longshot tri`, text: l.text, cost: l.cost, tier: 3, sc: l.overlay * Math.sqrt(l.hit) }));
+  longs.forEach(({ r, l }, i) => items.push({ id: `ls:${r.number}:${i}`, kind: 'Longshot', rn: r.number, label: `R${r.number} Longshot ${l.bet === 'ex' ? 'ex' : 'tri'}`, text: l.text, cost: l.cost, tier: 3, sc: l.overlay * Math.sqrt(l.hit) }));
   items.sort((a, b) => (a.tier - b.tier) || (b.sc - a.sc));
   const budget = cardBudget(); let spent = 0;
   const inn = [], out = [];
@@ -1410,7 +1422,7 @@ function cardPlan(races, longs, plans) {
     parts: { Tri: sum('Tri'), Ex: sum('Ex'), Super: sum('Super'), Longshot: sum('Longshot'), Pick: sum('Pick') } };
 }
 function planText(P) {
-  const nm = { Tri: 'trifectas', Ex: 'exactas', Super: 'superfectas', Longshot: 'longshot tris', Pick: 'Pick plays' };
+  const nm = { Tri: 'trifectas', Ex: 'exactas', Super: 'superfectas', Longshot: 'longshots', Pick: 'Pick plays' };
   return Object.entries(P.parts).filter(([, v]) => v > 0).map(([k, v]) => `${nm[k]} ${dollars(v)}`).join(' · ');
 }
 
@@ -1437,12 +1449,12 @@ function buildPrint() {
   const page2 = `<section class="pp cover sum2">${head('Best bets & plays (2 of 2)')}
     <div class="s2">
       <div class="s2box"><h2>Best bets</h2><ol>${H.best.map((r) => li(`<b>R${r.number} #${r.ranked[0].pgm} ${esc(tc(r.ranked[0].name))}</b> <span class="muted">ML ${esc(r.ranked[0].ml)} · line ${esc(r.ranked[0].line)} · ${r.confidence}/5</span><br><span class="small">${esc((r.ranked[0].pros[0] || ['best overall profile'])[0])}</span>`)).join('')}</ol></div>
-      <div class="s2box"><h2>Best trifectas</h2><ol>${H.tris.map((r) => li(`<b>R${r.number} ${esc(tc(r.trifecta.type))} ${esc(r.trifecta.text)}</b> <span class="muted">${dollars(r.trifecta.cost)} · model hit ~${Math.round(r.trifecta.hit * 100)}%</span>`)).join('')}</ol></div>
-      <div class="s2box"><h2>Best exactas</h2><ol>${H.exs.map((r) => li(`<b>R${r.number} ${esc(tc(r.exacta.type))} ${esc(r.exacta.text)}</b> <span class="muted">${dollars(r.exacta.cost)} · model hit ~${Math.round(r.exacta.hit * 100)}%</span>`)).join('')}</ol></div>
+      <div class="s2box"><h2>Best trifectas</h2><ol>${H.tris.map((r) => li(`<b>R${r.number} ${esc(tc(r.trifecta.type))} ${esc(r.trifecta.text)}</b> <span class="muted">${r.trifecta.conf}/5 · ${dollars(r.trifecta.cost)} · model hit ~${Math.round(r.trifecta.hit * 100)}%</span>`)).join('')}</ol></div>
+      <div class="s2box"><h2>Best exactas</h2><ol>${H.exs.map((r) => li(`<b>R${r.number} ${esc(tc(r.exacta.type))} ${esc(r.exacta.text)}</b> <span class="muted">${r.exacta.conf}/5 · ${dollars(r.exacta.cost)} · model hit ~${Math.round(r.exacta.hit * 100)}%</span>`)).join('')}</ol></div>
       <div class="s2box"><h2>Superfectas</h2>${H.sups.length ? `<ol>${H.sups.map((r) => li(`<b>R${r.number} ${esc(tc(r.superfecta.type))} ${esc(r.superfecta.text)}</b> <span class="muted">${dollars(r.superfecta.cost)} · ~${Math.round(r.superfecta.hit * 100)}%</span>`)).join('')}</ol>` : '<p class="muted">No superfecta plays on this card.</p>'}</div>
       <div class="s2box"><h2>Good value <span class="muted">(ML → our line)</span></h2>${H.good.length ? `<ol>${H.good.slice(0, 8).map(({ r, h }) => li(`<b class="gv">R${r.number} #${h.pgm} ${esc(tc(h.name))}</b> ML ${esc(h.ml.replace('/', '-'))} → line <b>${esc(h.line)}</b> <span class="muted">· ranked ${ord(h.rank)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
       <div class="s2box"><h2>Bad value — bet against <span class="muted">(ML → our line)</span></h2>${H.bad.length ? `<ol>${H.bad.slice(0, 8).map(({ r, h }) => li(`<b class="bv">R${r.number} #${h.pgm} ${esc(tc(h.name))}</b> ML ${esc(h.ml.replace('/', '-'))} → line <b>${esc(h.line)}</b> <span class="muted">· ranked ${ord(h.rank)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
-      <div class="s2box"><h2>Longshot trifectas <span class="muted">(top ${H.longs.length})</span></h2>${H.longs.length ? `<ol>${H.longs.map(({ r, l }) => li(`<b>R${r.number} ${esc(l.text)}</b> <span class="muted">${dollars(l.cost)} · ${esc(l.label)} · model ${pctP(l.hit, 1)} vs ML ${pctP(l.market, l.market < 0.01 ? 2 : 1)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
+      <div class="s2box"><h2>Longshots <span class="muted">(top ${H.longs.length})</span></h2>${H.longs.length ? `<ol>${H.longs.map(({ r, l }) => li(`<b>R${r.number} ${l.bet === 'ex' ? 'Ex' : 'Tri'} ${esc(l.text)}</b> <span class="muted">${dollars(l.cost)} · ${esc(l.label)} · model ${pctP(l.hit, 1)} vs ML ${pctP(l.market, l.market < 0.01 ? 2 : 1)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
       <div class="s2box"><h2>Pick 3 / 4 / 5 &amp; doubles</h2>${H.plans.length ? `<ul class="plain">${H.plans.map(({ b, t, alt }) => li(`${t.verdict === 'PLAY' ? '<b class="gv">PLAY</b>' : '<span class="muted">PASS</span>'} <b>${esc(b.name)} R${b.races[0]}–${b.races[b.races.length - 1]}</b> ${t.verdict === 'PLAY' ? `${ticketLine(t)} = <b>${dollars(t.cost)}</b> <span class="muted">(~${pctP(t.hit, 1)})</span>` : `<span class="muted">— ${esc(t.why)}</span>`}${alt ? `<br><span class="small">At $10: ${ticketLine(alt)} = ${dollars(alt.cost)} (~${pctP(alt.hit, 1)})</span>` : ''}`)).join('')}</ul>` : '<p class="muted">No multi-race wagers on this card.</p>'}</div>
     </div>
     <div class="spend"><b>Card plan ${dollars(H.plan.spent)} of ${dollars(H.plan.budget)}:</b> ${planText(H.plan)} <span class="muted">(✓ on page 1)</span>${H.plan.inn.some((x) => x.kind === 'Longshot') ? `<br><span class="small">Longshots in the plan: ${H.plan.inn.filter((x) => x.kind === 'Longshot').map((x) => `${esc(x.label.replace(' Longshot tri', ''))} ${esc(x.text)}`).join(' · ')}</span>` : ''}${H.plan.out.length ? `<br><span class="small muted">Left out to stay on budget: ${H.plan.out.map((x) => `${esc(x.label)} ${dollars(x.cost)}`).join(' · ')} — playing everything would be ${dollars(H.plan.all)}.</span>` : ''}</div>
