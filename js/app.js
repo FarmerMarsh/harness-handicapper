@@ -1,11 +1,11 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=16';
+import { parseProgram, fmtTime } from './parse.js?v=17';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=16';
-import { learnAll, learnedMult } from './learn.js?v=16';
+} from './engine.js?v=17';
+import { learnAll, learnedMult } from './learn.js?v=17';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -402,7 +402,8 @@ function scoreOpts(r) {
   const lean = S.st.tonight || 0;
   if (lean) { const f = 1.4 ** lean; for (const k of PACE_UP_K) m[k] = (m[k] ?? 1) * f; for (const k of PACE_DN_K) m[k] = (m[k] ?? 1) / f; }
   return { today: S.today, year: S.year, mult: m, driverTable: S.driverTable, scratched: S.st.scratches[r.number] || [], cond: S.st.cond || 'fast',
-    book: S.book, base: S.prefs.baseAuto !== false, season: S.prefs.season !== false, temp: l.temp };
+    book: S.book, base: S.prefs.baseAuto !== false, season: S.prefs.season !== false, temp: l.temp,
+    blend: (S.prefs.mlBlend ?? 35) / 100, live: (S.st.live || {})[r.number] || null };
 }
 
 // ---------------- learning from results ----------------
@@ -429,7 +430,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=16', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=17', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -596,6 +597,7 @@ function snapshot(r) {
     value: { good: [...(r.value?.good || [])], bad: [...(r.value?.bad || [])] },
     vdet: r.ranked.filter((h) => h.value).map((h) => [h.pgm, h.value, h.ml_prob ?? null, h.win_prob, h.ml, h.line]),
     feat: r.ranked.map((h) => [h.pgm, h.feat]),
+    top: { ml: r.ranked[0].ml_dec ?? null, p: r.ranked[0].win_prob, own: r.ranked[0].own_rank === 1 },
     meta: { track: S.card ? S.card.track : null, size: r.track_size ?? null, gait: r.gait || '', code: r.track_code || null, date: S.today || null },
   };
 }
@@ -634,6 +636,8 @@ function gradeRace(snap, fin) {
   row.bad = v.bad.length; row.bad_w = v.bad.filter((p) => p === fin[0]).length; row.bad_itm = v.bad.filter((p) => fin.slice(0, 3).includes(p)).length;
   const exp = (k) => (snap.vdet || []).filter((d) => d[1] === k && d[2] != null).reduce((a, d) => a + d[2], 0);
   row.good_mlexp = exp('good'); row.bad_mlexp = exp('bad');
+  row.top = snap.top || null;
+  row.gv = (snap.vdet || []).filter((d) => d[1] === 'good').map((d) => { const [a, b] = String(d[4] || '').split('/').map(Number); return { ml: b ? a / b : null, w: d[0] === fin[0], itm: fin.slice(0, 3).includes(d[0]) }; });
   return row;
 }
 function gradedRows(st) {
@@ -692,7 +696,7 @@ function racePlaysHtml(r) {
 function renderCard() {
   const c = S.card;
   const best = [...c.races].filter((r) => r.ranked.length > 1).sort((a, b) =>
-    (b.confidence - a.confidence) || ((b.ranked[0].score - b.ranked[1].score) - (a.ranked[0].score - a.ranked[1].score))).slice(0, 3);
+    (b.confidence - a.confidence) || ((b.ranked[0].pick - b.ranked[1].pick) - (a.ranked[0].pick - a.ranked[1].pick))).slice(0, 3);
   const nScr = Object.values(S.st.scratches).reduce((a, b) => a + b.length, 0);
   return `
   <div class="cardhead">
@@ -751,12 +755,12 @@ function whyHtml(r) {
   if (!h || !h2) return '';
   const pros = h.pros.slice(0, 2).map((p) => p[0]).join('; ') || 'best overall profile';
   const risk = h.cons.length ? h.cons[0][0] : 'no major red flags';
-  const gap = h.score - h2.score;
+  const gap = h.pick - h2.pick;
   const edge = gap >= 10 ? 'clear edge' : gap < 4 ? 'narrow edge' : 'solid edge';
-  const e = r.pace.early;
-  const pace = e.length === 1 ? `lone speed #${e[0]}` : e.length >= 3 ? `hot — ${e.map((x) => '#' + x).join(', ')} all want the lead`
-    : e.length === 2 ? `two early horses (${e.map((x) => '#' + x).join(', ')})` : 'no true early speed';
-  return `<b>Why #${h.pgm} ${esc(tc(h.name))}:</b> ${esc(pros)}. <b>Risk:</b> ${esc(risk)}. <b>Edge over #${h2.pgm}:</b> ${edge} (${gap.toFixed(1)} pts). <b>Pace:</b> ${esc(pace)}.`;
+  const t = r.trip;
+  const pace = t ? `${t.text.charAt(0).toLowerCase() + t.text.slice(1)}${t.leader != null ? ` (leader #${t.leader}${t.pocket != null ? `, pocket #${t.pocket}` : ''}${t.firstOver != null ? `, first-over #${t.firstOver}` : ''})` : ''}` : 'not enough lines to project the trip';
+  const moved = h.own_rank > 1 ? ` <b>Public:</b> our numbers alone had #${r.ranked.find((x) => x.own_rank === 1).pgm} on top — the ${r.live ? 'live odds' : 'morning line'} tipped it to #${h.pgm}.` : '';
+  return `<b>Why #${h.pgm} ${esc(tc(h.name))}:</b> ${esc(pros)}. <b>Risk:</b> ${esc(risk)}. <b>Edge over #${h2.pgm}:</b> ${edge} (${gap.toFixed(1)} pts). <b>Pace:</b> ${esc(pace)}.${moved}`;
 }
 
 const pcList = (items, cls) => `<ul class="${cls}">${items.length ? items.map(([t, imp]) => `<li class="${imp >= 3 ? 'b' : ''}">${esc(t)}</li>`).join('') : '<li class="faint none">—</li>'}</ul>`;
@@ -869,7 +873,7 @@ function projHtml(r) {
   const labels = ['WIN', '2ND', '3RD', '4TH', '5TH'];
   return `<div class="proj">${r.ranked.slice(0, 5).map((h, i) => `<div class="p ${i === 0 ? 'win' : i < 3 ? 't3' : ''}">
       <div class="lbl">${labels[i]}</div><div class="nm">#${h.pgm} ${esc(tc(h.name))}</div>
-      <div class="od">ML ${esc(h.ml)} · our line ${esc(h.line)} · ${Math.round(h.win_prob * 100)}%${h.value === 'good' ? ' · <b class="gv">GOOD VALUE</b>' : h.value === 'bad' ? ' · <b class="bv">BAD VALUE</b>' : ''}</div></div>`).join('')}</div>`;
+      <div class="od">ML ${esc(h.ml)}${h.live_dec != null ? ` · <b>live ${esc(oddsStr(h.live_dec))}</b>` : ''} · our line ${esc(h.line)} · ${Math.round(h.win_prob * 100)}%${h.value === 'good' ? ' · <b class="gv">GOOD VALUE</b>' : h.value === 'bad' ? ' · <b class="bv">BAD VALUE</b>' : ''}</div></div>`).join('')}</div>`;
 }
 
 function triTile(r) {
@@ -888,10 +892,10 @@ function triTile(r) {
 function valueTile(r) {
   const line = (p, good) => {
     const h = horseOf(r, p);
-    return `<li class="${good ? 'g' : 'r'}"><b>#${h.pgm} ${esc(tc(h.name))}</b> ML <b>${esc(h.ml.replace('/', '-'))}</b> · our line <b>${esc(h.line)}</b> <span class="faint">· ranked ${ord(h.rank)}</span></li>`;
+    return `<li class="${good ? 'g' : 'r'}"><b>#${h.pgm} ${esc(tc(h.name))}</b> ${r.live && h.live_dec != null ? 'live' : 'ML'} <b>${esc(r.live && h.live_dec != null ? oddsStr(h.live_dec) : h.ml.replace('/', '-'))}</b> · our line <b>${esc(h.line)}</b> <span class="faint">· ranked ${ord(h.rank)}</span></li>`;
   };
   const g = r.value.good, b = r.value.bad;
-  return `<div class="bet valuebox"><div class="lbl">VALUE vs MORNING LINE</div>
+  return `<div class="bet valuebox"><div class="lbl">VALUE vs ${r.live ? 'LIVE ODDS' : 'MORNING LINE'}</div>
     ${g.length || b.length ? `<ul>${g.map((p) => line(p, true)).join('')}${b.map((p) => line(p, false)).join('')}</ul>
       <div class="det"><span class="gv">Good</span> = morning line much longer than our line · <span class="bv">Bad</span> = morning line much shorter than our line</div>`
     : '<div class="det">No big gaps between the numbers and the morning line in this race.</div>'}</div>`;
@@ -900,7 +904,7 @@ function longTile(r) {
   const L = r.longshots;
   const list = (bet, name) => {
     const x = L.filter((l) => (l.bet || 'tri') === bet);
-    return x.length ? `<div class="lsgrp"><span class="lbl2">${name}</span><ul>${x.map((l) => `<li><b>${esc(l.text)}</b> <span class="faint">${dollars(l.cost)}</span> <span class="det">· model ${pctP(l.hit, 1)} vs ML ${pctP(l.market, l.market < 0.01 ? 2 : 1)} · ${esc(l.label)}</span></li>`).join('')}</ul></div>` : '';
+    return x.length ? `<div class="lsgrp"><span class="lbl2">${name}</span><ul>${x.map((l) => `<li><b>${esc(l.text)}</b> <span class="faint">${dollars(l.cost)}</span> <span class="det">· model ${pctP(l.hit, 1)} vs ${r.live ? 'odds' : 'ML'} ${pctP(l.market, l.market < 0.01 ? 2 : 1)} · ${esc(l.label)}</span></li>`).join('')}</ul></div>` : '';
   };
   return `<div class="bet longbox"><div class="lbl">LONGSHOTS — STRAIGHT TICKETS</div>
     ${L.length ? list('ex', 'Exactas') + list('tri', 'Trifectas') : '<div class="det">No live price horses to build longshot tickets around — nothing forced.</div>'}</div>`;
@@ -937,11 +941,37 @@ function renderRace(n) {
       ${['1st', '2nd', '3rd', '4th'].map((lbl, i) => `<label>${lbl}<select data-res="${n}" data-pos="${i}">${opts(res[i])}</select></label>`).join('')}
       </div>${graded || '<div class="graded note">Enter the result after the race to grade the picks and plays — or <a href="#/results">paste the whole card\'s results</a>.</div>'}</div>
   </div>
+  ${liveHtml(r, scrSet)}
   <div class="racenav" style="margin-top:14px">${n > 1 ? `<a class="btn" href="#/race/${n - 1}">← Race ${n - 1}</a>` : '<span></span>'}${raceOf(n + 1) ? `<a class="btn primary" href="#/race/${n + 1}">Race ${n + 1} →</a>` : ''}</div>`;
 }
 
+function tripHtml(r) {
+  const t = r.trip;
+  if (!t) return '';
+  const nm = (p) => { const h = horseOf(r, p); return h ? `<b>#${p}</b> ${esc(tc(h.name))}` : ''; };
+  const cell = (lbl, p, hint) => (p == null ? '' : `<div class="tp"><span class="lbl">${lbl}</span><span class="who">${nm(p)}</span><span class="hint">${hint}</span></div>`);
+  return `<div class="trip ${t.shape}"><div class="trip-h"><span class="lbl">WHO GETS THE TRIP</span><span class="shape">${esc(t.text)}</span></div>
+    <div class="trip-g">${cell('LEADER', t.leader, t.shape === 'soft' ? 'best guess for the front' : 'projected on the front')}${cell('POCKET', t.pocket, 'sits second, saves ground')}${cell('FIRST-OVER', t.firstOver, 'contender who has to move first')}${cell('CLOSER WITH COVER', t.cover, 'best late kick behind the movers')}</div></div>`;
+}
+function liveHtml(r, scrSet) {
+  const lv = (S.st.live || {})[r.number] || {};
+  const any = Object.keys(lv).length > 0;
+  return `<details class="live" ${any ? 'open' : ''}><summary>Live odds (optional)${any ? ' — in use for this race' : ''}</summary>
+    <p class="note">Near post time, type the tote-board odds (5-2, 7/2 or just 9). The pick then leans on the live odds instead of the morning line, and the value box compares live odds to our line. Leave blank to keep the morning line.</p>
+    <div class="livegrid">${r.horses.filter((h) => !scrSet.has(h.pgm)).map((h) => `<label><span>#${h.pgm} <i>${esc(h.ml || '')}</i></span><input data-live="${r.number}" data-pgm="${h.pgm}" inputmode="text" autocomplete="off" value="${lv[h.pgm] != null ? esc(oddsStr(lv[h.pgm])) : ''}" placeholder="—"></label>`).join('')}</div>
+    ${any ? `<button class="btn small" data-act="live-clear" data-n="${r.number}">Clear live odds</button>` : ''}</details>`;
+}
+function parseOdds(t) {
+  t = String(t || '').trim().toLowerCase().replace(/\s+/g, '');
+  if (!t) return null;
+  if (t === 'even' || t === 'evn' || t === 'e') return 1;
+  const m = t.match(/^(\d+(?:\.\d+)?)(?:[-\/:](\d+(?:\.\d+)?))?$/);
+  if (!m) return null;
+  const v = m[2] ? +m[1] / +m[2] : +m[1];
+  return Number.isFinite(v) && v >= 0 && v < 1000 ? v : null;
+}
 function raceTopHtml(r) {
-  return `${bannerHtml(r)}${projHtml(r)}${betsHtml(r)}<div class="why">${whyHtml(r)}</div>`;
+  return `${bannerHtml(r)}${projHtml(r)}${betsHtml(r)}${tripHtml(r)}<div class="why">${whyHtml(r)}</div>`;
 }
 function raceBodyHtml(r) {
   const sorted = sortedHorses(r);
@@ -1107,8 +1137,16 @@ function summarize(rows) {
     good: { n: sum('good'), w: sum('good_w'), itm: sum('good_itm'), mlexp: sum('good_mlexp') },
     bad: { n: sum('bad'), w: sum('bad_w'), itm: sum('bad_itm'), mlexp: sum('bad_mlexp') },
   };
-  return { by, plays, ls, val, n: rows.length, w: rows.filter((x) => x.win).length };
+  const band = (ml) => (ml == null ? null : ml < 2 ? 0 : ml < 4 ? 1 : ml < 8 ? 2 : 3);
+  const bands = BANDS.map(() => ({ n: 0, w: 0, itm: 0, exp: 0, gn: 0, gw: 0, gitm: 0 }));
+  for (const x of rows) {
+    const b = x.top ? band(x.top.ml) : null;
+    if (b != null) { const B = bands[b]; B.n++; B.w += x.win ? 1 : 0; B.itm += x.itm ? 1 : 0; B.exp += x.top.p || 0; }
+    for (const g of x.gv || []) { const gb = band(g.ml); if (gb != null) { bands[gb].gn++; bands[gb].gw += g.w ? 1 : 0; bands[gb].gitm += g.itm ? 1 : 0; } }
+  }
+  return { by, plays, ls, val, bands, n: rows.length, w: rows.filter((x) => x.win).length };
 }
+const BANDS = ['Under 2-1', '2-1 to 7-2', '4-1 to 7-1', '8-1 and up'];
 const LS_LABEL = { exacta: 'Longshot exactas', top: 'Value horse on top (older cards)', third: 'Value horse to run 3rd (older cards)', straight: 'Longshot trifectas' };
 function recordTables(sum, rows) {
   const conf = Object.entries(sum.by).sort((a, b) => b[0] - a[0]).map(([c, v]) => `<tr><td><span class="stars">${stars(+c)}</span> ${c}/5</td><td>${v.w}/${v.n}</td><td>${Math.round((100 * v.w) / v.n)}%</td><td>${v.itm}/${v.n}</td></tr>`).join('');
@@ -1126,7 +1164,9 @@ function recordTables(sum, rows) {
     <div class="panel"><h3>Longshots</h3><table class="rec"><thead><tr><th>Type</th><th>Hit</th><th>Hit %</th><th>Wagered</th></tr></thead><tbody>${lsRows}</tbody></table>
       ${tix.length ? `<details><summary class="note">Every graded longshot ticket (${tix.length})</summary><table class="rec small"><tbody>${tix.map((y) => `<tr><td>R${y.race}</td><td><b>${esc(y.text)}</b></td><td class="muted">${LS_LABEL[y.kind]}</td><td>${dollars(y.cost)}</td><td>${y.hit ? '<span class="ok">hit</span>' : '<span class="no">miss</span>'}</td></tr>`).join('')}</tbody></table></details>` : ''}</div>
     <div class="panel"><h3>Value horses</h3><table class="rec"><thead><tr><th>Flag</th><th>Horses</th><th>Won</th><th>ML says</th><th>In the money</th></tr></thead><tbody>${vr('Good value', sum.val.good, 'gv')}${vr('Bad value', sum.val.bad, 'bv')}</tbody></table>
-      <p class="note"><b>ML says</b> = how many wins the morning line expects from those horses. Good value is working when <b>Won</b> beats it; bad value is working when <b>Won</b> falls short of it.</p></div></div>`;
+      <p class="note"><b>ML says</b> = how many wins the morning line expects from those horses. Good value is working when <b>Won</b> beats it; bad value is working when <b>Won</b> falls short of it.</p></div>
+    <div class="panel"><h3>By morning-line price</h3><table class="rec"><thead><tr><th>ML price</th><th>Top picks won</th><th>We expected</th><th>Good-value horses won</th><th>…in the money</th></tr></thead><tbody>${sum.bands.map((b, i) => `<tr><td style="white-space:nowrap">${BANDS[i]}</td><td>${b.n ? `${b.w}/${b.n} (${Math.round((100 * b.w) / b.n)}%)` : '—'}</td><td>${b.n ? b.exp.toFixed(1) : '—'}</td><td>${b.gn ? `${b.gw}/${b.gn}` : '—'}</td><td>${b.gn ? `${b.gitm}/${b.gn}` : '—'}</td></tr>`).join('')}</tbody></table>
+      <p class="note">Shows which prices are paying their way. If top picks at 4-1 and up win more than <b>We expected</b>, lean into prices; if they fall short, stick to the shorter ones. Top-pick prices are tracked from Version 17 on.</p></div></div>`;
 }
 function renderRecord() {
   const cur = S.key ? gradedRows(S.st) : [];
@@ -1320,6 +1360,9 @@ function renderSettings() {
   <div class="panel" style="margin-top:12px"><h3>Email</h3>
     <div class="row"><label class="note" for="emailTo">Send-to address(es) for Email PDF — separate with commas (used when your browser opens an email draft)</label></div>
     <div class="row"><input id="emailTo" class="txt" type="email" multiple value="${esc(S.prefs.emailTo)}" placeholder="you@example.com, friend@example.com"><button class="btn" data-act="save-email">Save</button><span class="note" id="emailSaved"></span></div></div>
+  <div class="panel" style="margin-top:12px"><h3>Morning line in the pick</h3>
+    <div class="row"><div class="seg" role="group" aria-label="Morning line blend">${[[0, 'Off'], [20, 'Light'], [35, 'Normal'], [50, 'Heavy']].map(([v, l]) => `<button data-blend="${v}" class="${(S.prefs.mlBlend ?? 35) === v ? 'on' : ''}">${l}${v ? ` ${v}%` : ''}</button>`).join('')}</div></div>
+    <p class="note">The line-maker sees things the past lines don't, so the ranking and the bets blend our numbers with the morning line. <b>Our line</b> and the Good / Bad value calls always stay our numbers alone — that's what makes them a second opinion.</p></div>
   <div style="margin-top:12px">${learningHtml()}</div>
   <div style="margin-top:12px">${methodHtml()}</div>`;
 }
@@ -1373,7 +1416,7 @@ function sharedBanner() {
 function cardHighlights() {
   const c = S.card;
   const races = c.races.filter((r) => r.ranked.length > 1);
-  const gapOf = (r) => r.ranked[0].score - r.ranked[1].score;
+  const gapOf = (r) => r.ranked[0].pick - r.ranked[1].pick;
   const best = [...races].sort((a, b) => (b.confidence - a.confidence) || (gapOf(b) - gapOf(a))).slice(0, 5);
   const tris = [...races].filter((r) => r.trifecta.type !== 'N/A')
     .sort((a, b) => (b.trifecta.hit - a.trifecta.hit)).slice(0, 5);
@@ -1454,7 +1497,7 @@ function buildPrint() {
       <div class="s2box"><h2>Superfectas</h2>${H.sups.length ? `<ol>${H.sups.map((r) => li(`<b>R${r.number} ${esc(tc(r.superfecta.type))} ${esc(r.superfecta.text)}</b> <span class="muted">${dollars(r.superfecta.cost)} · ~${Math.round(r.superfecta.hit * 100)}%</span>`)).join('')}</ol>` : '<p class="muted">No superfecta plays on this card.</p>'}</div>
       <div class="s2box"><h2>Good value <span class="muted">(ML → our line)</span></h2>${H.good.length ? `<ol>${H.good.slice(0, 8).map(({ r, h }) => li(`<b class="gv">R${r.number} #${h.pgm} ${esc(tc(h.name))}</b> ML ${esc(h.ml.replace('/', '-'))} → line <b>${esc(h.line)}</b> <span class="muted">· ranked ${ord(h.rank)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
       <div class="s2box"><h2>Bad value — bet against <span class="muted">(ML → our line)</span></h2>${H.bad.length ? `<ol>${H.bad.slice(0, 8).map(({ r, h }) => li(`<b class="bv">R${r.number} #${h.pgm} ${esc(tc(h.name))}</b> ML ${esc(h.ml.replace('/', '-'))} → line <b>${esc(h.line)}</b> <span class="muted">· ranked ${ord(h.rank)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
-      <div class="s2box"><h2>Longshots <span class="muted">(top ${H.longs.length})</span></h2>${H.longs.length ? `<ol>${H.longs.map(({ r, l }) => li(`<b>R${r.number} ${l.bet === 'ex' ? 'Ex' : 'Tri'} ${esc(l.text)}</b> <span class="muted">${dollars(l.cost)} · ${esc(l.label)} · model ${pctP(l.hit, 1)} vs ML ${pctP(l.market, l.market < 0.01 ? 2 : 1)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
+      <div class="s2box"><h2>Longshots <span class="muted">(top ${H.longs.length})</span></h2>${H.longs.length ? `<ol>${H.longs.map(({ r, l }) => li(`<b>R${r.number} ${l.bet === 'ex' ? 'Ex' : 'Tri'} ${esc(l.text)}</b> <span class="muted">${dollars(l.cost)} · ${esc(l.label)} · model ${pctP(l.hit, 1)} vs ${r.live ? 'odds' : 'ML'} ${pctP(l.market, l.market < 0.01 ? 2 : 1)}</span>`)).join('')}</ol>` : '<p class="muted">None on this card.</p>'}</div>
       <div class="s2box"><h2>Pick 3 / 4 / 5 &amp; doubles</h2>${H.plans.length ? `<ul class="plain">${H.plans.map(({ b, t, alt }) => li(`${t.verdict === 'PLAY' ? '<b class="gv">PLAY</b>' : '<span class="muted">PASS</span>'} <b>${esc(b.name)} R${b.races[0]}–${b.races[b.races.length - 1]}</b> ${t.verdict === 'PLAY' ? `${ticketLine(t)} = <b>${dollars(t.cost)}</b> <span class="muted">(~${pctP(t.hit, 1)})</span>` : `<span class="muted">— ${esc(t.why)}</span>`}${alt ? `<br><span class="small">At $10: ${ticketLine(alt)} = ${dollars(alt.cost)} (~${pctP(alt.hit, 1)})</span>` : ''}`)).join('')}</ul>` : '<p class="muted">No multi-race wagers on this card.</p>'}</div>
     </div>
     <div class="spend"><b>Card plan ${dollars(H.plan.spent)} of ${dollars(H.plan.budget)}:</b> ${planText(H.plan)} <span class="muted">(✓ on page 1)</span>${H.plan.inn.some((x) => x.kind === 'Longshot') ? `<br><span class="small">Longshots in the plan: ${H.plan.inn.filter((x) => x.kind === 'Longshot').map((x) => `${esc(x.label.replace(' Longshot tri', ''))} ${esc(x.text)}`).join(' · ')}</span>` : ''}${H.plan.out.length ? `<br><span class="small muted">Left out to stay on budget: ${H.plan.out.map((x) => `${esc(x.label)} ${dollars(x.cost)}`).join(' · ')} — playing everything would be ${dollars(H.plan.all)}.</span>` : ''}</div>
@@ -1667,6 +1710,8 @@ document.addEventListener('click', (e) => {
     if (S.key) rescoreAll(); render(); return;
   }
   if (t.dataset.tonight !== undefined) { S.st.tonight = +t.dataset.tonight; saveState(); rescoreAll(); render(); return; }
+  if (act === 'live-clear') { if (S.st.live) delete S.st.live[+t.dataset.n]; saveState(); rescoreAll(); render(); return; }
+  if (t.dataset.blend !== undefined) { S.prefs.mlBlend = +t.dataset.blend; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
   if (act === 'learn-use') { S.prefs.learnUse = t.checked; LS.set(PREF_KEY, S.prefs); if (S.key) rescoreAll(); render(); return; }
   if (act === 'learn-freeze') { S.prefs.learnFreeze = t.checked; LS.set(PREF_KEY, S.prefs); render(); return; }
   if (act === 'learn-now') { runLearning(); return; }
@@ -1795,6 +1840,17 @@ document.addEventListener('change', async (e) => {
     S.st.results[n] = arr;
     if (arr.some(Boolean)) S.st.snaps[n] = snapshot(raceOf(n)); else delete S.st.snaps[n];
     saveState(); render(); scheduleLearning();
+  }
+  if (t.dataset.live) {
+    const n = +t.dataset.live, v = parseOdds(t.value);
+    S.st.live = S.st.live || {}; const lv = S.st.live[n] = S.st.live[n] || {};
+    if (v == null) delete lv[t.dataset.pgm]; else lv[t.dataset.pgm] = v;
+    if (!Object.keys(lv).length) delete S.st.live[n];
+    saveState();
+    const r = raceOf(n); scoreOne(r); S.dirty = true;
+    if ($('#raceTop')) { $('#raceTop').innerHTML = raceTopHtml(r); $('#raceBody').innerHTML = raceBodyHtml(r); }
+    t.value = v == null ? '' : oddsStr(v);
+    return;
   }
   if (t.dataset.pbase) {
     const st = S.st.picks[t.dataset.pbase] = S.st.picks[t.dataset.pbase] || {};

@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=16';
+import { fmtTime } from './parse.js?v=17';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -12,21 +12,21 @@ let CUR_TEMP = TEMP;   // learning can widen or tighten the lines (temp × 0.7�
 export const DEFAULT_WEIGHTS = {
   speed: 30,      // one speed number (v11): avg speed rating 55% + avg adjusted mile 25% + best rating 20%, clean last 4
   close: 12,      // avg adjusted last quarter
-  early: 8,       // first-quarter position + estimated opening-quarter time
-  form: 16,       // avg finish last 4 starts
+  early: 8,       // v17: how often he leaves (1st–3rd at the ¼), fitted to tonight's post and the leavers inside him, + ¼ position/time
+  form: 12,       // avg finish last 4 starts (v17: 16 → 12, hold-out check)
   class: 8,       // class ratings faced + circuit tier + same-track purse move
   year: 8,        // current-year win / top-3 %
   driver: 7,      // driver UDR
   trainer: 3,     // trainer win %
   post: 7,        // the track's real post-position win index (front page / program post rating)
   late: 4,        // avg spots gained 3/4 -> finish
-  trend: 10,      // speed figures rising or falling over the last 3–4 starts
+  trend: 4,       // (v17: 10 → 4 — no predictive value in the hold-out check) speed figures rising or falling over the last 3–4 starts
   hot: 5,         // driver & trainer last 30 days vs the year
   conn: 5,        // driver/trainer team, record at this track, new-barn move
   offtrack: 6,    // off-track record + sire off-track (only when the track is set to Off)
-  beaten: 5,      // avg beaten lengths, last 4 real starts (winners count 0)
-  odds: 4,        // last-start odds — how the bettors rated him last time
-  fresh: 3,       // days since last start (7–21 days is the sweet spot)
+  beaten: 10,     // (v17: 5 → 10) avg beaten lengths, last 4 real starts (winners count 0)
+  odds: 7,        // (v17: 4 → 7) last-start odds — how the bettors rated him last time
+  fresh: 6,       // (v17: 3 → 6) days since last start (7–21 days is the sweet spot)
   sizefit: 4,     // speed figures on today's track size vs his other sizes
 };
 
@@ -90,11 +90,13 @@ export function baseMult(race, { today, book, season = true } = {}) {
 // Weighted points are rescaled to this total so adding factors (or turning some up) doesn't
 // change how spread out the win chances are — only which horses get the credit.
 export const BASE_SUM = 108;
+// v17: the pick blends our numbers with the morning line (or live odds). Value calls still use our pure line.
+export const ML_BLEND = 0.35, LIVE_BLEND = 0.5, ML_SHARP = 1.5;
 
 // Everything a user can turn up or down. Multiplier 1 = normal.
 export const FACTORS = [
   { key: 'speed', group: 'weight', label: 'Speed', help: 'Speed ratings and adjusted mile times in the last 4 clean starts (average, plus the best)' },
-  { key: 'early', group: 'weight', label: 'Opening speed (first ¼)', help: 'Position and estimated time at the first quarter' },
+  { key: 'early', group: 'weight', label: 'Opening speed (first ¼)', help: 'How often he leaves (1st–3rd at the quarter), adjusted for tonight\'s post and the other leavers, plus quarter position and time' },
   { key: 'close', group: 'weight', label: 'Closing speed (last ¼)', help: 'Horse\'s own last-quarter time' },
   { key: 'late', group: 'weight', label: 'Late move (¾→finish)', help: 'Spots gained or lost after the 3/4 call' },
   { key: 'form', group: 'weight', label: 'Recent form', help: 'Average finish over the last 4 starts' },
@@ -219,6 +221,21 @@ export function horseMetrics(h, race, today, year) {
   m.open_q = oq.length ? mean(oq) : null;
   const op = clean.filter((p) => p.open_pos).map((p) => p.open_pos);
   m.open_pos = op.length ? mean(op) : null;
+  // v17 leave rate: how often he is 1st–3rd at the quarter (clean last 4); leaving from post 6+ earns a little extra
+  const lv = clean.filter((p) => p.open_pos).map((p) => {
+    const c = p.open_pos <= 1 ? 1 : p.open_pos <= 2 ? 0.8 : p.open_pos <= 3 ? 0.55 : 0;
+    return Math.min(1, c * (c > 0 && (p.post || 0) >= 6 ? 1.15 : 1));
+  });
+  m.leave = lv.length ? mean(lv) : null;
+  m.leave_n = lv.length; m.leave_hits = lv.filter((x) => x > 0).length;
+  const postNo = h.post_no ?? parseInt(h.pgm, 10);
+  m.post_no = Number.isFinite(postNo) ? postNo : null;
+  const gate = race.track_size === 0.5 ? 8 : race.track_size === 0.625 ? 9 : 10;
+  m.second_tier = m.post_no != null && m.post_no > gate;
+  const pf = m.post_no == null ? 1 : m.second_tier ? 0.45
+    : race.track_size === 0.5 ? [1, 1, 1, 1, 0.95, 0.85, 0.75, 0.65][m.post_no - 1] ?? 0.65
+    : [1, 1, 1, 1, 1, 0.92, 0.84, 0.76, 0.7, 0.65][m.post_no - 1] ?? 0.65;
+  m.leave_t = m.leave == null ? null : m.leave * pf;
   const lm = clean.filter((p) => p.calls[2] && p.calls[4] && p.calls[2].pos && p.calls[4].pos)
     .map((p) => [p.calls[2].pos, p.calls[4].pos]);
   m.late_pairs = lm;
@@ -398,7 +415,7 @@ function mulberry32(a) {
 function simulate(ranked, n = 40000, seed = 7) {
   const rnd = mulberry32(seed);
   const k = ranked.length;
-  const lam = ranked.map((h) => h.score / CUR_TEMP);
+  const lam = ranked.map((h) => Math.log(h.win_prob));
   const posCount = Array.from({ length: k }, () => new Array(k).fill(0));
   const c = { key234: 0, key23: 0, box3: 0, box4: 0, straight: 0, exKey: 0, exBox3: 0, exBox2: 0, sfKey: 0, sfBox4: 0, sfKey3: 0 };
   const near = new Array(k).fill(0);
@@ -457,7 +474,7 @@ function undercardConf(sim) {
 
 function confidence(ranked) {
   if (ranked.length < 2) return 3;
-  const s = ranked.map((h) => h.score);
+  const s = ranked.map((h) => h.pick ?? h.score);
   const gap1 = s[0] - s[1];
   const gap3 = s[0] - s[Math.min(2, s.length - 1)];
   const top = ranked[0].m;
@@ -492,7 +509,7 @@ export const KEY_AT = 0.25;
 const keyWinner = (race) => race.ranked.length >= 2 && race.ranked[0].win_prob > KEY_AT;
 // confidence /5 for a ticket, from the model's chance it hits
 const starsFor = (hit, cuts) => 1 + cuts.filter((c) => hit >= c).length;
-const EX_CUTS = [0.065, 0.08, 0.10, 0.125], TRI_CUTS = [0.04, 0.05, 0.065, 0.085];
+const EX_CUTS = [0.078, 0.09, 0.10, 0.117], TRI_CUTS = [0.046, 0.058, 0.07, 0.083];   // v17: re-cut to fifths after the blend
 
 // number of distinct tickets a set of legs covers (each finisher must be a different horse)
 export function countCombos(legs) {
@@ -560,7 +577,7 @@ function superfectaCall(race) {
 
 // Morning-line probabilities, normalized so they add to 100% across the starters.
 function marketProbs(ranked) {
-  const raw = ranked.map((h) => (h.ml_dec != null && h.ml_dec >= 0 ? 1 / (h.ml_dec + 1) : null));
+  const raw = ranked.map((h) => { const d = h.live_dec ?? h.ml_dec; return d != null && d >= 0 ? 1 / (d + 1) : null; });
   const known = raw.filter((x) => x != null);
   if (known.length < Math.max(2, ranked.length - 1)) return null;
   const fill = known.length < raw.length ? Math.min(...known) * 0.6 : 0;
@@ -584,19 +601,20 @@ function valueCall(race) {
   const mk = marketProbs(rk);
   const OR = mk ? Math.max(1.0, mk.overround) : 1.2;
   for (const h of rk) {
-    const ln = toLine(1 / (h.win_prob * OR) - 1);
+    const ln = toLine(1 / ((h.own_prob ?? h.win_prob) * OR) - 1);
+    h.mkt_dec = h.live_dec ?? h.ml_dec;
     h.line_dec = ln.dec; h.line = ln.text;
     h.ml_prob = null; h.value = null; h.value_ratio = null;
   }
   if (!mk) return { good: [], bad: [] };
   rk.forEach((h, i) => { h.ml_prob = mk.probs[i]; });
-  const has = (h) => h.ml_dec != null;
+  const has = (h) => h.mkt_dec != null;
   // good: ML at least 1.75× our line and 2+ points longer (e.g. ML 10-1, our line 5-1)
-  const good = rk.filter((h) => has(h) && h.ml_dec >= 1.75 * h.line_dec && h.ml_dec - h.line_dec >= 2)
-    .map((h) => ((h.value_ratio = h.ml_dec / h.line_dec), h)).sort((a, b) => b.value_ratio - a.value_ratio).slice(0, 3);
+  const good = rk.filter((h) => has(h) && h.mkt_dec >= 1.75 * h.line_dec && h.mkt_dec - h.line_dec >= 2)
+    .map((h) => ((h.value_ratio = h.mkt_dec / h.line_dec), h)).sort((a, b) => b.value_ratio - a.value_ratio).slice(0, 3);
   // bad: our line at least 2× the ML and 2+ points longer, on horses 8-1 or shorter (e.g. ML 5-1, our line 10-1) — 2× since Nov 6
-  const bad = rk.filter((h) => has(h) && h.ml_dec <= 8 && h.line_dec >= 2 * h.ml_dec && h.line_dec - h.ml_dec >= 2)
-    .map((h) => ((h.value_ratio = h.line_dec / h.ml_dec), h)).sort((a, b) => b.value_ratio - a.value_ratio).slice(0, 2);
+  const bad = rk.filter((h) => has(h) && h.mkt_dec <= 8 && h.line_dec >= 2 * h.mkt_dec && h.line_dec - h.mkt_dec >= 2)
+    .map((h) => ((h.value_ratio = h.line_dec / h.mkt_dec), h)).sort((a, b) => b.value_ratio - a.value_ratio).slice(0, 2);
   for (const h of good) h.value = 'good';
   for (const h of bad) h.value = 'bad';
   return { good: good.map((h) => h.pgm), bad: bad.map((h) => h.pgm) };
@@ -611,7 +629,8 @@ function longshotCall(race) {
   const q = rk.map((h) => h.ml_prob);
   const liveN = Math.max(4, Math.ceil(k * 0.6));
   const live = (i) => i < liveN && rk[i].win_prob >= 0.05 && rk[i].value !== 'bad';
-  const price = (i) => live(i) && rk[i].ml_dec != null && rk[i].ml_dec >= 5 && (rk[i].value === 'good' || rk[i].ml_dec >= 0.9 * rk[i].line_dec);
+  const price = (i) => live(i) && rk[i].mkt_dec != null && rk[i].mkt_dec >= 5 && (rk[i].value === 'good' || rk[i].mkt_dec >= 0.9 * rk[i].line_dec);
+  const edge = 1 + 0.25 * (1 - (race.blend || 0));   // the blend already pulls our chances toward the public's
   const idx = rk.map((h, i) => i);
   if (!idx.some(price)) return [];
   const ex = (a, b) => { let t = 0; for (let c = 0; c < k; c++) if (c !== a && c !== b) t += s.tri(a, b, c); return t; };
@@ -643,7 +662,7 @@ function longshotCall(race) {
   for (const a of idx) for (const b of idx) {
     if (a === b || !live(a) || !live(b) || !(price(a) || price(b))) continue;
     const p = ex(a, b), m = mEx(a, b);
-    if (p < 0.015 || 1 / m < 12 || p < 1.25 * m) continue;   // our chance must beat the line's by 25%+
+    if (p < 0.015 || 1 / m < 12 || p < edge * m) continue;   // our chance must beat the line's by 25%+
     exC.push({ t: [a, b], p, m, sc: (p / m) * Math.sqrt(p) });
   }
   pick(exC, 'ex', wagerBase(race, 'EXACTA') ?? 1, race.exacta && race.exacta.legs);
@@ -652,7 +671,7 @@ function longshotCall(race) {
   for (const a of idx) for (const b of idx) for (const c of idx) {
     if (a === b || b === c || a === c || !live(a) || !live(b) || !live(c) || !(price(a) || price(b) || price(c))) continue;
     const p = s.tri(a, b, c), m = mTri(a, b, c);
-    if (p < 0.004 || 1 / m < 30 || p < 1.25 * m) continue;
+    if (p < 0.004 || 1 / m < 30 || p < edge * m) continue;
     triC.push({ t: [a, b, c], p, m, sc: (p / m) * Math.sqrt(p) });
   }
   pick(triC, 'tri', wagerBase(race, 'TRIFECTA') ?? 1.0, race.trifecta && race.trifecta.legs);
@@ -792,7 +811,7 @@ function postIndexSrc(race, h) {
   return { v: g, src: `typical ${SIZE_LABEL[race.track_size] || '⅝-mile'} post index` };
 }
 
-export function scoreRace(race, { today, year, mult, driverTable, scratched = [], sim = true, cond = 'fast', book = null, books = null, season = true, base = true, temp = 1 }) {
+export function scoreRace(race, { today, year, mult, driverTable, scratched = [], sim = true, cond = 'fast', book = null, books = null, season = true, base = true, temp = 1, blend = ML_BLEND, live = null }) {
   race.cond = cond;
   CUR_TEMP = TEMP * (temp || 1);
   race.temp = CUR_TEMP;
@@ -827,7 +846,13 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
   const wsum = Object.values(W).reduce((a, b) => a + b, 0);
   const wnorm = wsum > 0 ? BASE_SUM / wsum : 1;
   for (const h of hs) h.m = horseMetrics(h, race, today, year);
-  const early = hs.filter((h) => h.m.open_pos != null && h.m.open_pos <= 2.5 && h.m.clean_n >= 2 && !h.m.stale);
+  // v17: leavers = horses that leave at least about half the time once tonight's post is counted
+  const early = hs.filter((h) => h.m.leave_t != null && h.m.leave_t >= 0.5 && h.m.clean_n >= 2 && !h.m.stale);
+  for (const h of hs) {
+    const inside = early.filter((o) => o !== h && o.m.post_no != null && h.m.post_no != null && o.m.post_no < h.m.post_no).length;
+    h.m.leavers_inside = inside;
+    h.m.early_val = h.m.leave_t == null ? null : h.m.leave_t * Math.max(0.5, 1 - 0.12 * inside);
+  }
   race.pace = { early: early.map((h) => h.pgm) };
   const closers = hs.filter((h) => h.m.close_q != null).sort((a, b) => a.m.close_q - b.m.close_q).slice(0, 3);
   for (const h of hs) {
@@ -859,7 +884,7 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
     close: norm(col('close_q'), false), form: norm(col('avg_fin4'), false),
     beaten: norm(col('beaten4'), false), odds: norm(col('odds_val'), true, 0.45), fresh: hs.map((h) => h.m.fresh_val ?? 0.5),
     sizefit: norm(col('sizefit'), true, 0.45),
-    early: (() => { const a = norm(col('open_pos'), false), b = norm(col('open_q'), false); return a.map((x, i) => 0.5 * x + 0.5 * b[i]); })(),
+    early: (() => { const a = norm(col('open_pos'), false), b = norm(col('open_q'), false); return a.map((x, i) => 0.6 * (hs[i].m.early_val ?? 0.25) + 0.2 * x + 0.2 * b[i]); })(),
     class: norm(col('class_val'), true, 0.4), late: norm(col('late_gain'), true, 0.4), year: norm(col('year_score')),
     driver: norm(col('driver_udr')), trainer: norm(col('trainer_w')),
     post: hs.map((h) => { const v = postIndex(race, h); h.m.post_idx = v; return v == null ? 0.5 : Math.max(0, Math.min(1, 0.5 + v / 130)); }),
@@ -886,13 +911,28 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
     h.bonus = bonus; h.penalty = pen;
     h.comp = Object.fromEntries(Object.keys(W).map((k) => [k, comp[k] ? comp[k][i] : 0]));
   });
-  const ranked = [...hs].sort((a, b) => b.score - a.score);
+  let ranked = [...hs].sort((a, b) => b.score - a.score);
   const ex = ranked.map((h) => Math.exp(h.score / CUR_TEMP));
   const tot = ex.reduce((a, b) => a + b, 0);
-  ranked.forEach((h, i) => { h.win_prob = ex[i] / tot; h.fair_odds = 1 / h.win_prob - 1; h.rank = i + 1; });
+  ranked.forEach((h, i) => { h.own_prob = ex[i] / tot; h.win_prob = h.own_prob; h.own_rank = i + 1; h.live_dec = live && live[h.pgm] != null ? +live[h.pgm] : null; });
+  // v17: blend our numbers with the public's (morning line, or live odds once you type them in)
+  const anyLive = ranked.some((h) => h.live_dec != null);
+  const mk0 = marketProbs(ranked);
+  const bw = mk0 ? Math.max(0, Math.min(0.8, anyLive ? Math.max(blend ?? 0, LIVE_BLEND) : blend ?? 0)) : 0;
+  race.blend = bw; race.live = anyLive;
+  if (bw > 0) {
+    // morning lines are flatter than the real betting (a 5-2 program favourite wins far more than his line says), so sharpen them
+    const sharp = anyLive ? 1 : ML_SHARP;
+    const lg = ranked.map((h, i) => (1 - bw) * Math.log(h.own_prob) + bw * sharp * Math.log(mk0.probs[i]));
+    const mx = Math.max(...lg), e2 = lg.map((x) => Math.exp(x - mx)), t2 = e2.reduce((a, b) => a + b, 0);
+    ranked.forEach((h, i) => { h.win_prob = e2[i] / t2; });
+    ranked = [...ranked].sort((a, b) => b.win_prob - a.win_prob);
+  }
+  ranked.forEach((h, i) => { h.fair_odds = 1 / h.own_prob - 1; h.rank = i + 1; h.pick = CUR_TEMP * Math.log(h.win_prob); });
   race.ranked = ranked;
   race.active = hs;
   race.confidence = confidence(ranked);
+  race.trip = tripPicture(race, ranked, early);
   if (!sim) return race;
   race.sim = simulate(ranked);
   race.undercard = undercardConf(race.sim);
@@ -903,6 +943,26 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
   race.longshots = longshotCall(race);
   for (const h of hs) [h.pros, h.cons] = prosCons(h, hs, race, year);
   return race;
+}
+
+// v17 "who gets the trip": projected leader, pocket, first-over and the closer with cover.
+function tripPicture(race, ranked, leavers) {
+  const byEarly = ranked.filter((h) => h.m.early_val != null).sort((a, b) => b.m.early_val - a.m.early_val || (a.m.post_no ?? 99) - (b.m.post_no ?? 99));
+  if (byEarly.length < 3) return null;
+  const n = leavers.length;
+  const leader = byEarly[0];
+  const soft = leader.m.early_val < 0.35;
+  const pocket = byEarly.slice(1).find((h) => h.m.early_val >= 0.3) || null;
+  const used = new Set([leader, pocket]);
+  const firstOver = ranked.slice(0, 4).find((h) => !used.has(h)) || null;
+  used.add(firstOver);
+  const cover = ranked.filter((h) => !used.has(h) && h.m.close_q != null && h.rank <= Math.max(5, Math.ceil(ranked.length * 0.7))).sort((a, b) => a.m.close_q - b.m.close_q)[0] || null;
+  const shape = soft ? 'soft' : n <= 1 ? 'lone' : n === 2 ? 'honest' : 'contested';
+  const text = { soft: 'No real leaver — whoever makes the front can walk them and steal it', lone: 'One leaver — he should get the front without a fight',
+    honest: 'Two leavers — an honest pace, front and pocket both live', contested: `${n} leavers — a fight for the front that sets it up for closers` }[shape];
+  const pg = (h) => (h ? h.pgm : null);
+  for (const [h, role] of [[leader, 'leader'], [pocket, 'pocket'], [firstOver, 'first-over'], [cover, 'cover']]) if (h) h.m.trip_role = role;
+  return { leader: pg(leader), pocket: pg(pocket), firstOver: pg(firstOver), cover: pg(cover), shape, text, leavers: leavers.map((h) => h.pgm) };
 }
 
 function rankOf(h, hs, key, higherBetter = true) {
@@ -943,8 +1003,11 @@ function prosCons(h, hs, race, year) {
   else if (r === 2) P(`Strong closer: last 1/4 avg ${m.close_q.toFixed(1)}`, 2);
   else if (r && r === k && k >= 4) C(`Weakest finisher: last 1/4 avg ${m.close_q.toFixed(1)}`, 3);
   if (m.open_pos != null) {
-    if (m.open_pos <= 2.0) P(`Gate speed: avg ${m.open_pos.toFixed(1)} at the 1/4 (opens in ${m.open_q.toFixed(1)})`, m.open_pos <= 1.5 ? 3 : 2);
-    else if (m.open_pos >= 6) C(`Opens slow: avg ${m.open_pos.toFixed(1)} at the 1/4 (opens in ${m.open_q.toFixed(1)})`, 2);
+    const oq = m.open_q != null ? ` (opens in ${m.open_q.toFixed(1)})` : '';
+    if (m.leave_n >= 2 && m.leave_t != null && m.leave_t >= 0.5) P(`Gate speed: 1st–3rd at the 1/4 in ${m.leave_hits} of last ${m.leave_n}${oq}`, m.leave_t >= 0.8 ? 3 : 2);
+    else if (m.leave_n >= 2 && m.leave >= 0.6 && m.leave_t < 0.5) C(`Leaver stuck with ${m.second_tier ? 'the second tier' : 'post ' + m.post_no} — hard to make the front tonight`, 2);
+    else if (m.open_pos <= 2.0) P(`Gate speed: avg ${m.open_pos.toFixed(1)} at the 1/4${oq}`, 2);
+    else if (m.open_pos >= 6) C(`Opens slow: avg ${m.open_pos.toFixed(1)} at the 1/4${m.open_q != null ? ` (opens in ${m.open_q.toFixed(1)})` : ''}`, 2);
   }
   const fins = m.fins3.join('-');
   if (m.won_last) P(`Won last start (last 3: ${fins})`, 3);
@@ -971,6 +1034,12 @@ function prosCons(h, hs, race, year) {
   if ('lone_speed' in tags) P('Lone speed: only true early horse in the field', 3);
   if ('speed_duel' in tags) C(`Speed duel likely with ${race.pace.early.filter((x) => x !== h.pgm).map((x) => '#' + x).join(', ')}`, 2);
   if ('closer_setup' in tags) P('Hot pace up front sets up his late kick', 2);
+  const tp = race.trip;
+  if (tp && !('lone_speed' in tags)) {
+    if (m.trip_role === 'leader' && tp.shape !== 'contested' && tp.shape !== 'soft') P('Projected leader — should make the front', 2);
+    else if (m.trip_role === 'pocket' && tp.leader) P(`Projected pocket trip behind #${tp.leader}`, 2);
+    else if (m.trip_role === 'first-over' && h.rank <= 4 && race.track_size != null && race.track_size <= 0.625) C('Likely has to come first-over — the hard trip', 1);
+  }
   const dc = m.drv_change;
   if (dc) {
     const prev = dc.prev.split(',')[0];
