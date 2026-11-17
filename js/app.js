@@ -1,11 +1,11 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=15';
+import { parseProgram, fmtTime } from './parse.js?v=16';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=15';
-import { learnAll, learnedMult } from './learn.js?v=15';
+} from './engine.js?v=16';
+import { learnAll, learnedMult } from './learn.js?v=16';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -429,7 +429,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=15', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=16', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -1301,8 +1301,8 @@ function methodHtml() {
   <p><b>Class</b>: average class rating of the last 3 races versus today's, plus a circuit adjustment for shippers (Yonkers, the Meadowlands and Mohawk tougher; Vernon, Tioga, fairs softer).</p>
   <p><b>Added points</b>: lone speed +${ADJ.lone_speed}, closer with a hot pace +${ADJ.closer_setup}, driver upgrade +${ADJ.driver_up}/+${ADJ.driver_up_big}, tough trip that still finished close +${ADJ.tough_trip} each (max +${ADJ.tough_trip_cap}); speed duel ${ADJ.speed_duel}, driver downgrade ${ADJ.driver_down}. Penalties for breaks, layoffs, stale form and thin data.</p>
   <p><b>Winner confidence</b> blends the top pick's points margin with data quality. <b>Undercard</b> rates how often the projected 2nd–5th finish within one spot of projection in 40,000 simulated races.</p>
-  <p><b>Exacta &amp; trifecta</b>: every race gets both. If the top pick is over 25% to win, KEY him — exacta over the next two, trifecta over the next three. Otherwise BOX — exacta the top two, trifecta the top three. Each ticket is rated out of 5 from the model's chance it hits (exacta 6.5% / 8% / 10% / 12.5% for 2–5 stars; trifecta 4% / 5% / 6.5% / 8.5%). A superfecta shows only when the trifecta is a key and the undercard is 3/5+.</p>
-  <p><b>Longshots</b>: up to 3 straight exactas and 3 straight trifectas per race. Every horse on a ticket has to be live (top 60% of the field by our ranking, 5%+ to win, not flagged bad value), and each ticket needs a price horse — 5-1 or longer on the morning line that the numbers like at least as much as the line. Tickets are mixed (different winners, price horse in different spots) but never padded with a weak horse; if a race has no live price horse it gets none.</p>
+  <p><b>Exacta &amp; trifecta</b>: every race gets both. If the top pick is over 25% to win, KEY him — exacta over the next two, trifecta over the next three. Otherwise BOX — exacta the top two, trifecta the top three. Each ticket is rated out of 5 from the model's chance it hits (exacta 6.5% / 8% / 10% / 12.5% for 2–5 stars; trifecta 4% / 5% / 6.5% / 8.5%). A superfecta shows only when the trifecta is a key and the next two picks are each 14%+ to win.</p>
+  <p><b>Longshots</b>: up to 3 straight exactas and 3 straight trifectas per race. Every horse on a ticket has to be live (top 60% of the field by our ranking, 5%+ to win, not flagged bad value), and each ticket needs a price horse — 5-1 or longer on the morning line that the numbers like at least as much as the line — and the ticket itself must be 25%+ more likely by our numbers than by the morning line. Tickets are mixed (different winners, price horse in different spots) but never padded with a weak horse; if a race has no live price horse it gets none.</p>
   <p><b>Value</b> (morning line vs our line): <span class="gv">good value</span> = ML at least 1.75× our line and 2+ points longer (ML 10-1, our line 5-1). <span class="bv">Bad value</span> = our line at least 2× the ML and 2+ points longer, on horses 8-1 or shorter (ML 5-1, our line 10-1). <b>Longshot trifectas</b> are built around the good-value horses: the tickets the model gives a real chance that the morning line prices much lower (model % vs ML %).</p>
   <p><b>Multi-race tickets</b> single a horse when he's 5/5 and 35%+ (or clears the style's coverage alone) and otherwise add horses in projected order until the leg covers 45% (tight), 60% (balanced) or 75% (wide) of the model's win chance.</p>
   <p><b>Opening speed</b> combines average position at the first quarter with the estimated opening-quarter time. Season and lifetime marks are shown but no longer scored — recent races say more.</p>

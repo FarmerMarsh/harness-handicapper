@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=15';
+import { fmtTime } from './parse.js?v=16';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -191,7 +191,7 @@ function isClean(p) {
 }
 const pct = (n, d) => (d ? (100 * n) / d : null);
 
-function horseMetrics(h, race, today, year) {
+export function horseMetrics(h, race, today, year) {
   const m = {};
   const starts = h.pp.filter((p) => !p.scratched);
   const real = starts.filter((p) => !p.qua);
@@ -549,11 +549,13 @@ function superfectaCall(race) {
   if (base == null || rk.length < 5) return { type: 'N/A', text: 'not offered', combos: 0, cost: 0, hit: 0, base, legs: null };
   // Marshall (Nov 6): superfecta only when we're strong enough to key, and keep it cheap —
   // top pick over the next three (6 combos), never a 24-combo box.
-  if (race.trifecta.type === 'KEY' && race.undercard >= 3) {
+  // Marshall (Nov 16): only with a key AND at least two strong horses behind him (each 14%+ to win)
+  const strong2 = rk[1].win_prob >= 0.14 && rk[2].win_prob >= 0.14;
+  if (race.trifecta.type === 'KEY' && strong2) {
     const u = [pg(1), pg(2), pg(3)];
     return { type: 'KEY', text: `#${pg(0)} over ${u.map((x) => '#' + x).join(', ')}`, legs: [[pg(0)], u, u, u], combos: 6, cost: 6 * base, hit: s.sf_key_1_over_234, base };
   }
-  return { type: 'PASS', text: 'pass', combos: 0, cost: 0, hit: s.sf_key_1_over_234, base, legs: null, why: race.trifecta.type === 'KEY' ? 'undercard too loose for a cheap key' : 'only played when the trifecta is a key' };
+  return { type: 'PASS', text: 'pass', combos: 0, cost: 0, hit: s.sf_key_1_over_234, base, legs: null, why: race.trifecta.type === 'KEY' ? 'needs two strong horses behind the key' : 'only played when the trifecta is a key' };
 }
 
 // Morning-line probabilities, normalized so they add to 100% across the starters.
@@ -641,7 +643,7 @@ function longshotCall(race) {
   for (const a of idx) for (const b of idx) {
     if (a === b || !live(a) || !live(b) || !(price(a) || price(b))) continue;
     const p = ex(a, b), m = mEx(a, b);
-    if (p < 0.015 || 1 / m < 12) continue;
+    if (p < 0.015 || 1 / m < 12 || p < 1.25 * m) continue;   // our chance must beat the line's by 25%+
     exC.push({ t: [a, b], p, m, sc: (p / m) * Math.sqrt(p) });
   }
   pick(exC, 'ex', wagerBase(race, 'EXACTA') ?? 1, race.exacta && race.exacta.legs);
@@ -650,7 +652,7 @@ function longshotCall(race) {
   for (const a of idx) for (const b of idx) for (const c of idx) {
     if (a === b || b === c || a === c || !live(a) || !live(b) || !live(c) || !(price(a) || price(b) || price(c))) continue;
     const p = s.tri(a, b, c), m = mTri(a, b, c);
-    if (p < 0.004 || 1 / m < 30) continue;
+    if (p < 0.004 || 1 / m < 30 || p < 1.25 * m) continue;
     triC.push({ t: [a, b, c], p, m, sc: (p / m) * Math.sqrt(p) });
   }
   pick(triC, 'tri', wagerBase(race, 'TRIFECTA') ?? 1.0, race.trifecta && race.trifecta.legs);

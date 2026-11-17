@@ -1,6 +1,6 @@
 [package]
 name = "harness-handicapper"
-version = "0.15.0"
+version = "0.16.0"
 description = "Harness Handicapper — Windows desktop app"
 edition = "2021"
 
