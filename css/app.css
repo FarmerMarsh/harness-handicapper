@@ -170,7 +170,12 @@ h2.section { font-size: 15px; text-transform: uppercase; letter-spacing: .6px; c
 /* horse table (desktop) */
 .htable-wrap { overflow-x: auto; background: #fff; border-radius: var(--radius); box-shadow: var(--shadow); }
 table.ht { border-collapse: collapse; width: 100%; font-size: 12.5px; }
-table.ht th { background: var(--navy); color: #fff; font-size: 11px; font-weight: 700; padding: 7px 6px; text-align: center; white-space: nowrap; position: sticky; top: 0; }
+table.ht th { background: var(--navy); color: #fff; font-size: 11px; font-weight: 700; padding: 7px 6px; text-align: center; white-space: nowrap; }
+/* floating copy of the horse-table header, shown while its real header has scrolled out of view (see floatHead() in app.js) — a true CSS sticky th can't be used here because the table also needs native horizontal scrolling on narrower desktop widths, and a horizontal-scroll container breaks position:sticky's vertical offset */
+.floathead { position: fixed; top: 100px; z-index: 20; overflow-x: hidden; box-shadow: 0 3px 10px rgba(0,0,0,.2); display: none; }
+.floathead.show { display: block; }
+.floathead table { border-collapse: collapse; table-layout: fixed; }
+.floathead th { background: var(--navy); color: #fff; font-size: 11px; font-weight: 700; padding: 7px 6px; text-align: center; white-space: nowrap; box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; }
 table.ht td { border-bottom: 1px solid var(--rule); padding: 6px; text-align: center; vertical-align: middle; }
 table.ht td.l { text-align: left; }
 table.ht td.pcol { text-align: left; vertical-align: top; font-size: 12px; width: 21%; }

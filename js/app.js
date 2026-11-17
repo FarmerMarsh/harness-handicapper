@@ -1,11 +1,11 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=19';
+import { parseProgram, fmtTime } from './parse.js?v=20';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=19';
-import { learnAll, learnedMult } from './learn.js?v=19';
+} from './engine.js?v=20';
+import { learnAll, learnedMult } from './learn.js?v=20';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -430,7 +430,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=19', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=20', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -536,6 +536,141 @@ function tonightHtml() {
   if (!t.lean) return `<div class="tonight"><b>Tonight so far:</b> no clear lean. <span class="note">${facts}</span></div>`;
   return `<div class="tonight"><b>Tonight: ${t.why}.</b> <span class="note">${facts} Small samples fool you — this is a light tilt.</span> <button class="btn small primary" data-tonight="${t.lean}">Lean ${t.lean > 0 ? 'toward speed' : 'toward closers'} for the rest of tonight</button></div>`;
 }
+// ---------------- trends: what tonight's graded races are actually showing ----------------
+function gradedRaces() {
+  const out = [];
+  for (const [rn, fin] of Object.entries(S.st.results || {})) {
+    const snap = S.st.snaps && S.st.snaps[rn], w = (fin || [])[0];
+    if (!snap || !snap.feat || !w || !snap.feat.some(([p]) => p === w)) continue;
+    out.push({ rn: +rn, snap, fin, w });
+  }
+  out.sort((a, b) => a.rn - b.rn);
+  return out;
+}
+function postNoMap(snap) {
+  return snap.pn ? new Map(snap.pn) : new Map((snap.order || []).map((p) => [p, p]));
+}
+function trendsInfo() {
+  if (!S.key) return null;
+  const races = gradedRaces();
+  if (races.length < 3) return { n: races.length };
+  let early = 0, close = 0, topWon = 0, top3 = 0;
+  const postRows = new Map();   // post -> { starts, wins, idxSum, idxN }
+  const gaitRows = {};          // gait -> { n, early, close }
+  for (const g of races) {
+    const { snap, w } = g;
+    const rank = (k) => { const v = snap.feat.map(([p, f]) => [p, (f && f.c && f.c[k]) ?? 0.5]).sort((a, b) => b[1] - a[1]); return v.findIndex(([p]) => p === w) + 1; };
+    const isEarly = rank('early') <= 3, isClose = rank('close') <= 3;
+    if (isEarly) early++;
+    if (isClose) close++;
+    if (snap.order && snap.order[0] === w) topWon++;
+    if (snap.order && snap.order.slice(0, 3).includes(w)) top3++;
+    const gait = (snap.meta && snap.meta.gait) || '?';
+    const gr = gaitRows[gait] || (gaitRows[gait] = { n: 0, early: 0, close: 0 });
+    gr.n++; if (isEarly) gr.early++; if (isClose) gr.close++;
+    const pn = postNoMap(snap);
+    for (const [pgm, feat] of snap.feat) {
+      const p = pn.get(pgm) ?? pgm;
+      const row = postRows.get(p) || { starts: 0, wins: 0, idxSum: 0, idxN: 0 };
+      row.starts++;
+      if (pgm === w) row.wins++;
+      if (feat && feat.c && feat.c.post != null) { row.idxSum += feat.c.post; row.idxN++; }
+      postRows.set(p, row);
+    }
+  }
+  const n = races.length;
+  let lean = 0, why = '';
+  if (early / n >= 0.7 && early - close >= 2) { lean = n >= 5 ? 1 : 0.5; why = 'Speed is holding'; }
+  else if (close / n >= 0.7 && close - early >= 2) { lean = n >= 5 ? -1 : -0.5; why = 'Closers are getting there'; }
+  const totalStarts = [...postRows.values()].reduce((a, r) => a + r.starts, 0);
+  const avgWin = totalStarts ? n / totalStarts : null;   // baseline win rate across every starter graded so far
+  const posts = [...postRows.entries()]
+    .map(([post, r]) => {
+      // comp.post (0..1, centered 0.5) is 0.5 + idx/130 where idx is a % deviation from the track's average post win rate (see postIndex() in engine.js) —
+      // convert the night's average composite back into that same deviation, then project it onto tonight's own average win rate so it lands on the
+      // same win% scale as the "Wins" column, instead of comparing a relative index against an absolute percentage.
+      const idx = r.idxN ? (r.idxSum / r.idxN - 0.5) * 130 : null;
+      const modelPct = idx != null && avgWin != null ? Math.max(0, avgWin * (1 + idx / 100)) : null;
+      return { post, ...r, modelPct };
+    })
+    .filter((p) => p.post >= 1 && p.post <= 20)
+    .sort((a, b) => a.post - b.post);
+  return { n, early, close, lean, why, topWon, top3, posts, gaitRows };
+}
+function renderTrends() {
+  const t = trendsInfo();
+  const head = `<div class="cardhead"><div><h1>Trends</h1><div class="sub">${esc(S.card.track)} · ${esc(S.card.date)} · How tonight's graded races are actually running — fills in as you enter more results.</div></div></div>`;
+  if (!t || t.n < 3) return `${head}<div class="panel"><p class="note">Enter a few official results (${t ? t.n : 0} graded so far — need at least 3) and tonight's pace, post and pick trends will show up here.</p></div>`;
+  const pct = (a, b) => (b ? Math.round((100 * a) / b) + '%' : '—');
+  const paceRow = `<div class="row note" style="gap:16px;flex-wrap:wrap">
+    <span><b>${t.early}/${t.n}</b> winners (${pct(t.early, t.n)}) were top-3 on early speed</span>
+    <span><b>${t.close}/${t.n}</b> winners (${pct(t.close, t.n)}) were top-3 closers</span>
+  </div>`;
+  const leanP = t.why
+    ? `<p class="note" style="margin-top:6px"><b>${esc(t.why)}.</b> ${t.n < 5 ? "Still a small sample — light tilt only." : "Worth leaning on for the rest of the card."}</p>`
+    : `<p class="note" style="margin-top:6px">No clear speed-vs-closer lean yet.</p>`;
+  const gaits = Object.entries(t.gaitRows);
+  const gaitHtml = gaits.length > 1 ? `<table class="rec" style="margin-top:8px"><thead><tr><th>Gait</th><th>Races</th><th>Early top-3</th><th>Close top-3</th></tr></thead><tbody>
+    ${gaits.map(([g, r]) => `<tr><td>${esc(g === 'TROT' ? 'Trot' : g === 'PACE' ? 'Pace' : g)}</td><td>${r.n}</td><td>${pct(r.early, r.n)}</td><td>${pct(r.close, r.n)}</td></tr>`).join('')}
+  </tbody></table>` : '';
+  const postHtml = `<table class="rec"><thead><tr><th>Post</th><th>Starts</th><th>Wins</th><th>Win%</th><th>Model expected</th></tr></thead><tbody>
+    ${t.posts.map((p) => {
+      const actualPct = p.starts ? (100 * p.wins) / p.starts : null;
+      const modelPct = p.modelPct != null ? 100 * p.modelPct : null;
+      const hot = p.starts >= 3 && actualPct != null && modelPct != null && actualPct - modelPct >= 12;
+      const cold = p.starts >= 3 && actualPct != null && modelPct != null && modelPct - actualPct >= 12;
+      return `<tr${hot ? ' style="background:#eafbea"' : cold ? ' style="background:#fdeeee"' : ''}><td>${p.post}</td><td>${p.starts}</td><td>${p.wins}</td><td>${actualPct != null ? Math.round(actualPct) + '%' : '—'}</td><td>${modelPct != null ? Math.round(modelPct) + '%' : '—'}</td></tr>`;
+    }).join('')}
+  </tbody></table>`;
+  const pickP = `<p class="note">Our top pick has won <b>${t.topWon}/${t.n}</b> (${pct(t.topWon, t.n)}) and landed in the top 3 of <b>${t.top3}/${t.n}</b> (${pct(t.top3, t.n)}) graded races so far tonight.</p>`;
+  return `${head}
+  <div class="panel"><h3>Pace tonight</h3>${paceRow}${leanP}${gaitHtml}</div>
+  <div class="panel" style="margin-top:12px"><h3>Posts tonight</h3><p class="note">Every horse that started, not just winners. "Model expected" is the usual post edge for this track/size; green rows are running hotter than that, pink rows colder. Under 3 starts isn't marked either way.</p>${postHtml}</div>
+  <div class="panel" style="margin-top:12px"><h3>How our picks are doing</h3>${pickP}</div>`;
+}
+// ---------------- floating header for the horse table ----------------
+// A true CSS `position: sticky` th can't be used on table.ht: its wrapper also needs native
+// horizontal scrolling on narrower desktop widths, and giving an ancestor `overflow-x: auto`
+// makes it the scroll container sticky positions against, which breaks the intended
+// viewport-relative stickiness. So instead we float a measured clone of the header over the
+// page once the real header scrolls above the fixed topbar+daybar, kept in horizontal sync.
+const FLOATHEAD_OFFSET = 100; // .topbar (55px) + .daybar (45px)
+function floatHeadSync() {
+  if (!S._floatHeadBar) {
+    const bar = document.createElement('div');
+    bar.className = 'floathead';
+    document.body.appendChild(bar);
+    S._floatHeadBar = bar;
+    const onScroll = () => floatHeadSync();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+    document.addEventListener('scroll', (e) => { if (e.target && e.target.classList && e.target.classList.contains('htable-wrap')) floatHeadSync(); }, true);
+  }
+  const bar = S._floatHeadBar;
+  const wrap = document.querySelector('.hview-table.auto .htable-wrap, .hview-table.force .htable-wrap');
+  const table = wrap && wrap.querySelector('table.ht');
+  const thead = table && table.querySelector('thead');
+  if (!wrap || !table || !thead || wrap.offsetParent === null) { bar.classList.remove('show'); return; }
+  const theadTop = thead.getBoundingClientRect().top, tableBottom = table.getBoundingClientRect().bottom;
+  if (theadTop < FLOATHEAD_OFFSET && tableBottom > FLOATHEAD_OFFSET + thead.offsetHeight) {
+    const srcKey = `${S.key}|${curRace()}`;
+    if (bar.dataset.src !== srcKey) {
+      const realThs = [...thead.querySelectorAll('th')];
+      bar.innerHTML = '';
+      const tbl = document.createElement('table'); tbl.className = 'ht';
+      const thd = document.createElement('thead'); const row = document.createElement('tr');
+      for (const th of realThs) { const c = document.createElement('th'); c.textContent = th.textContent; row.appendChild(c); }
+      thd.appendChild(row); tbl.appendChild(thd); bar.appendChild(tbl);
+      bar.dataset.src = srcKey;
+      const floatThs = row.querySelectorAll('th');
+      realThs.forEach((th, i) => { floatThs[i].style.width = th.getBoundingClientRect().width + 'px'; });
+    }
+    const wrapRect = wrap.getBoundingClientRect();
+    bar.style.left = wrapRect.left + 'px'; bar.style.width = wrapRect.width + 'px';
+    bar.scrollLeft = wrap.scrollLeft;
+    bar.classList.add('show');
+  } else bar.classList.remove('show');
+}
 function scoreOne(r) { scoreRace(r, scoreOpts(r)); }
 // every driver on tonight's card with his printed stats — for late driver changes
 function cardDrivers() {
@@ -628,6 +763,7 @@ function snapshot(r) {
     value: { good: [...(r.value?.good || [])], bad: [...(r.value?.bad || [])] },
     vdet: r.ranked.filter((h) => h.value).map((h) => [h.pgm, h.value, h.ml_prob ?? null, h.win_prob, h.ml, h.line]),
     feat: r.ranked.map((h) => [h.pgm, h.feat]),
+    pn: r.ranked.map((h) => [h.pgm, h.m.post_no ?? h.pgm]),
     wp: r.ranked.map((h) => [h.pgm, +h.win_prob.toFixed(4)]),
     top: { ml: r.ranked[0].ml_dec ?? null, p: r.ranked[0].win_prob, own: r.ranked[0].own_rank === 1 },
     meta: { track: S.card ? S.card.track : null, size: r.track_size ?? null, gait: r.gait || '', code: r.track_code || null, date: S.today || null },
@@ -796,8 +932,17 @@ function summaryCard() {
 }
 
 // ---------------- render: race ----------------
+// one short, concrete reason the top pick is rated above a given rival
+function reasonOver(h, riv) {
+  if (!riv) return '';
+  if (riv.cons && riv.cons.length) return riv.cons[0][0];
+  const hm = h.m, rm = riv.m;
+  if (hm && rm && hm.avg_fin3 != null && rm.avg_fin3 != null && hm.avg_fin3 < rm.avg_fin3 - 0.3) return `sharper recent form (avg fin ${hm.avg_fin3.toFixed(1)} vs ${rm.avg_fin3.toFixed(1)})`;
+  if (hm && rm && hm.life_win != null && rm.life_win != null && hm.life_win > rm.life_win + 0.04) return `wins more often lifetime (${pctP(hm.life_win, 0)} vs ${pctP(rm.life_win, 0)})`;
+  return `${(h.pick - riv.pick).toFixed(1)} pts back on our line`;
+}
 function whyHtml(r) {
-  const h = r.ranked[0], h2 = r.ranked[1];
+  const h = r.ranked[0], h2 = r.ranked[1], h3 = r.ranked[2];
   if (!h || !h2) return '';
   const pros = h.pros.slice(0, 2).map((p) => p[0]).join('; ') || 'best overall profile';
   const risk = h.cons.length ? h.cons[0][0] : 'no major red flags';
@@ -806,7 +951,8 @@ function whyHtml(r) {
   const t = r.trip;
   const pace = t ? `${t.text.charAt(0).toLowerCase() + t.text.slice(1)}${t.leader != null ? ` (leader #${t.leader}${t.pocket != null ? `, pocket #${t.pocket}` : ''}${t.firstOver != null ? `, first-over #${t.firstOver}` : ''})` : ''}` : 'not enough lines to project the trip';
   const moved = h.own_rank > 1 ? ` <b>Public:</b> our numbers alone had #${r.ranked.find((x) => x.own_rank === 1).pgm} on top — the ${r.live ? 'live odds' : 'morning line'} tipped it to #${h.pgm}.` : '';
-  return `<b>Why #${h.pgm} ${esc(tc(h.name))}:</b> ${esc(pros)}. <b>Risk:</b> ${esc(risk)}. <b>Edge over #${h2.pgm}:</b> ${edge} (${gap.toFixed(1)} pts). <b>Pace:</b> ${esc(pace)}.${moved}`;
+  const over3 = h3 ? ` <b>Over #${h3.pgm}:</b> ${esc(reasonOver(h, h3))}.` : '';
+  return `<b>Why #${h.pgm} ${esc(tc(h.name))}:</b> ${esc(pros)}. <b>Risk:</b> ${esc(risk)}. <b>Edge over #${h2.pgm}:</b> ${edge} (${gap.toFixed(1)} pts) — ${esc(reasonOver(h, h2))}.${over3} <b>Pace:</b> ${esc(pace)}.${moved}`;
 }
 
 const pcList = (items, cls) => `<ul class="${cls}">${items.length ? items.map(([t, imp]) => `<li class="${imp >= 3 ? 'b' : ''}">${esc(t)}</li>`).join('') : '<li class="faint none">—</li>'}</ul>`;
@@ -1823,6 +1969,8 @@ function render() {
     upload.hidden = true; view.hidden = false;
     view.innerHTML = sharedBanner() + html;
     if (navKey) nav.querySelector(`[data-nav="${navKey}"]`)?.classList.add('on');
+    if (S._floatHeadBar) { S._floatHeadBar.classList.remove('show'); S._floatHeadBar.dataset.src = ''; }
+    setTimeout(floatHeadSync, 0);
   };
   if (route === 'settings') return show(renderSettings(), 'settings');
   if (route === 'record') return show(renderRecord(), 'record');
@@ -1832,6 +1980,7 @@ function render() {
     renderRecent(); return;
   }
   if (route === 'picks') return show(renderPicks(), 'picks');
+  if (route === 'trends') return show(renderTrends(), 'trends');
   if (route === 'results') return show(renderResults(), 'record');
   const m = route.match(/^race\/(\d+)/);
   if (m) return show(renderRace(+m[1]));
