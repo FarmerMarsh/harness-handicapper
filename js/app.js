@@ -1,11 +1,12 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=20';
+import { parseProgram, fmtTime } from './parse.js?v=21';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=20';
-import { learnAll, learnedMult } from './learn.js?v=20';
+} from './engine.js?v=21';
+import { learnAll, learnedMult } from './learn.js?v=21';
+import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=21';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -421,8 +422,9 @@ function learnRows() {
       if (!snap || !snap.feat || !order.length || !snap.feat.some(([p]) => p === order[0])) continue;
       const meta = snap.meta || {};
       const trot = snap.feat.some(([, f]) => f && f.b && f.b.form > 1.05);
+      const dateStr = ymd(meta.date ?? cardDate({ date: key.split('|')[1] }));
       rows.push({ feat: snap.feat, fin: order.slice(0, 3), track: meta.track || track, size: meta.size ?? book.size ?? (TRACK_INFO[book.code] || {}).size ?? null,
-        gait: meta.gait || (trot ? 'TROT' : 'PACE'), card: key });
+        gait: meta.gait || (trot ? 'TROT' : 'PACE'), card: key, key: dateStr ? poolKeyFor(normKey(meta.track || track), dateStr, +rn) : null });
     }
   }
   return rows;
@@ -430,7 +432,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=20', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=21', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -439,8 +441,14 @@ function scheduleLearning(delay = 2500) {
   clearTimeout(S._lt);
   S._lt = setTimeout(runLearning, delay);
 }
-function runLearning() {
-  const rows = learnRows();
+async function runLearning() {
+  const local = learnRows();
+  // merge in the shared pool (every result anyone's entered, anywhere) — best-effort, never blocks on a slow/offline pool
+  let poolRows = [];
+  try { poolRows = (await pullPool()).map(poolRowToLearnRow).filter(Boolean); } catch { poolRows = []; }
+  const poolKeys = new Set(poolRows.map((r) => r.key));
+  const rows = [...poolRows, ...local.filter((r) => !r.key || !poolKeys.has(r.key))];
+  S.poolRows = poolRows.length;
   if (!rows.length) return;
   S.learning = true; renderLearnStatus();
   const done = (res) => {
@@ -462,12 +470,18 @@ function renderLearnStatus() {
   const el = $('#learnStatus');
   if (el) el.innerHTML = learnStatusText();
 }
+function poolStatusLine() {
+  const n = S.poolRows || 0;
+  if (poolStatusRaw === 'ok') return n ? `Shared pool: synced — ${n} race${n === 1 ? '' : 's'} from the pool went into this.` : 'Shared pool: synced (nothing in the pool yet).';
+  if (poolStatusRaw === 'error') return "Shared pool: couldn't reach it just now — using this browser's own results only; it'll pick back up next time it can reach the pool.";
+  return 'Shared pool: not checked yet.';
+}
 function learnStatusText() {
   const L = S.learned;
   if (S.learning) return 'Learning from your results…';
-  if (!L || !L.n) return 'No graded races yet — enter official orders on the race pages or paste them in.';
+  if (!L || !L.n) return `No graded races yet — enter official orders on the race pages or paste them in. <span class="note">${poolStatusLine()}</span>`;
   const when = new Date(L.at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  return `${L.n} graded races (${L.nPos} finish positions) · updated ${when}${S.prefs.learnFreeze ? ' · <b>frozen</b>' : ''}`;
+  return `${L.n} graded races (${L.nPos} finish positions) · updated ${when}${S.prefs.learnFreeze ? ' · <b>frozen</b>' : ''} <span class="note">· ${poolStatusLine()}</span>`;
 }
 const KLABEL = Object.fromEntries(FACTORS.map((f) => [f.key, f.label]));
 function learnChanges(o, min = 0.09) {
@@ -502,7 +516,7 @@ function learningHtml() {
     <label class="row note"><input type="checkbox" data-act="learn-freeze" ${S.prefs.learnFreeze ? 'checked' : ''}> Freeze (stop updating)</label>
     <button class="btn small" data-act="learn-now">Re-learn now</button></div>`;
   return `<div class="panel learnp"><h3>Learning from your results</h3>
-    <p class="note">Every result you enter is kept with what the model knew before the race. It learns in layers — all tracks → track size → each track → trotters / pacers — each starting from the one above and pulled back toward it, so a handful of races barely moves anything and hundreds can move a lot. It also checks whether a horse we call 20% really wins about 20%. Learned weights sit on top of the track normal; your own sliders sit on top of that.</p>
+    <p class="note">Every result you enter is kept with what the model knew before the race, and shared into a pool every device/browser using the site adds to and learns from — the more results everyone enters, the better the model gets for everyone. It learns in layers — all tracks → track size → each track → trotters / pacers — each starting from the one above and pulled back toward it, so a handful of races barely moves anything and hundreds can move a lot. It also checks whether a horse we call 20% really wins about 20%. Learned weights sit on top of the track normal; your own sliders sit on top of that.</p>
     ${body}</div>`;
 }
 
@@ -626,7 +640,8 @@ function renderTrends() {
   return `${head}
   <div class="panel"><h3>Pace tonight</h3>${paceRow}${leanP}${gaitHtml}</div>
   <div class="panel" style="margin-top:12px"><h3>Posts tonight</h3><p class="note">Every horse that started, not just winners. "Model expected" is the usual post edge for this track/size; green rows are running hotter than that, pink rows colder. Under 3 starts isn't marked either way.</p>${postHtml}</div>
-  <div class="panel" style="margin-top:12px"><h3>How our picks are doing</h3>${pickP}</div>`;
+  <div class="panel" style="margin-top:12px"><h3>How our picks are doing</h3>${pickP}</div>
+  <p class="note" id="poolStatus" style="margin-top:10px">${poolStatusLine()}</p>`;
 }
 // ---------------- floating header for the horse table ----------------
 // A true CSS `position: sticky` th can't be used on table.ht: its wrapper also needs native
@@ -1376,6 +1391,27 @@ function applyResult(n, order) {
   if (!r) return;
   S.st.results[n] = [0, 1, 2, 3].map((i) => order[i] ?? null);
   S.st.snaps[n] = snapshot(r);
+  syncGradedRace(n);
+}
+// push one graded race's model-view + official finish to the shared pool (see js/sync.js). Fire-and-forget: never
+// blocks the save, and failures are silent — the race stays graded locally exactly as it always has.
+function poolRowFor(n, snap) {
+  const meta = snap.meta || {};
+  const dateStr = ymd(meta.date ?? S.today);
+  const trackKey = normKey(meta.track || (S.card && S.card.track) || '');
+  if (!trackKey || !dateStr || !snap.feat || !S.st.results[n]) return null;
+  return { track_key: trackKey, race_date: dateStr, race_no: n, gait: meta.gait || null, track_size: meta.size ?? null, entries: snap.feat, finish: firstRun(S.st.results[n]) };
+}
+function syncGradedRace(n) {
+  const snap = S.st.snaps && S.st.snaps[n];
+  if (!snap) return;
+  const row = poolRowFor(n, snap);
+  if (!row || !row.finish.length) return;
+  pushToPool(row).then(renderPoolStatusEl);
+}
+function renderPoolStatusEl() {
+  const el = $('#poolStatus'); if (el) el.textContent = poolStatusLine();
+  renderLearnStatus();
 }
 
 // ---------------- render: record ----------------
@@ -2155,7 +2191,7 @@ document.addEventListener('change', async (e) => {
     const arr = [...(S.st.results[n] || [null, null, null, null])];
     arr[+t.dataset.pos] = t.value ? +t.value : null;
     S.st.results[n] = arr;
-    if (arr.some(Boolean)) S.st.snaps[n] = snapshot(raceOf(n)); else delete S.st.snaps[n];
+    if (arr.some(Boolean)) { S.st.snaps[n] = snapshot(raceOf(n)); syncGradedRace(n); } else delete S.st.snaps[n];
     saveState(); render(); scheduleLearning();
   }
   if (t.dataset.pay || t.dataset.payper) {
