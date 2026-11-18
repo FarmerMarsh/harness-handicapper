@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=24';
+import { fmtTime } from './parse.js?v=25';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -40,8 +40,10 @@ export const SIZE_MULT = {
   1:     { early: 0.75, pace: 0.75, close: 1.5,  late: 1.5,  post: 0.9, tough_trip: 0.75 },  // closers get their share
 };
 export const SIZE_LABEL = { 0.5: 'half-mile', 0.625: '⅝-mile', 0.875: '⅞-mile', 1: 'mile' };
-// trotters: break more (penalty already harsher), races less about who leaves, outside posts worse
-export const GAIT_MULT = { TROT: { early: 0.85, pace: 0.85, close: 1.1, late: 1.1, form: 1.1, class: 1.1, post: 1.1 }, PACE: {} };
+// trotters: break more (penalty already harsher), outside posts worse, closing/form/class/post count a little more
+// v25 (Marshall): trotters should count their opening ¼ more, pacers their closing ¼ more — flipped early up for
+// trotters (was 0.85, under-weighted) and added a matching closing bump for pacers (had none before).
+export const GAIT_MULT = { TROT: { early: 1.25, pace: 0.85, close: 1.1, late: 1.1, form: 1.1, class: 1.1, post: 1.1 }, PACE: { close: 1.25 } };
 // a track that plays faster or fairer than its size
 export const PLAYS_MULT = {
   speed: { early: 1.25, pace: 1.25, close: 0.85, late: 0.85 },
@@ -80,6 +82,7 @@ export function baseMult(race, { today, book, season = true } = {}) {
   const mul = (o, why) => { if (!o) return; let any = false; for (const [k, v] of Object.entries(o)) { out[k] = (out[k] ?? 1) * v; any = true; } if (any && why) parts.push(why); };
   mul(SIZE_MULT[race.track_size], SIZE_LABEL[race.track_size] ? `${SIZE_LABEL[race.track_size]} normal` : '');
   if (race.gait === 'TROT') mul(GAIT_MULT.TROT, 'trotters');
+  else mul(GAIT_MULT.PACE, 'pacers');
   const info = TRACK_INFO[race.track_code] || {};
   const plays = book && book.plays && book.plays !== 'auto' ? (book.plays === 'size' ? null : book.plays) : info.plays;
   if (plays && PLAYS_MULT[plays]) mul(PLAYS_MULT[plays], plays === 'speed' ? 'plays fast' : 'plays fair to closers');

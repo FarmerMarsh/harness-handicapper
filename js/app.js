@@ -1,12 +1,12 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=24';
+import { parseProgram, fmtTime } from './parse.js?v=25';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=24';
-import { learnAll, learnedMult } from './learn.js?v=24';
-import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=24';
+} from './engine.js?v=25';
+import { learnAll, learnedMult } from './learn.js?v=25';
+import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=25';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -451,7 +451,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=24', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=25', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -587,6 +587,9 @@ function gradedRaces() {
 function postNoMap(snap) {
   return snap.pn ? new Map(snap.pn) : new Map((snap.order || []).map((p) => [p, p]));
 }
+// v25 (Marshall): same top-3 idea already used for early/closing speed, generalized to every
+// scored factor — which other stats do tonight's winners also tend to rank top-3 in, for their race.
+const TREND_FACTOR_KEYS = FACTORS.filter((f) => f.group === 'weight').map((f) => f.key);
 function trendsInfo() {
   if (!S.key) return null;
   const races = gradedRaces();
@@ -594,6 +597,7 @@ function trendsInfo() {
   let early = 0, close = 0, topWon = 0, top3 = 0;
   const postRows = new Map();   // post -> { starts, wins, idxSum, idxN }
   const gaitRows = {};          // gait -> { n, early, close }
+  const factorHits = Object.fromEntries(TREND_FACTOR_KEYS.map((k) => [k, 0]));
   for (const g of races) {
     const { snap, w } = g;
     const rank = (k) => { const v = snap.feat.map(([p, f]) => [p, (f && f.c && f.c[k]) ?? 0.5]).sort((a, b) => b[1] - a[1]); return v.findIndex(([p]) => p === w) + 1; };
@@ -602,6 +606,7 @@ function trendsInfo() {
     if (isClose) close++;
     if (snap.order && snap.order[0] === w) topWon++;
     if (snap.order && snap.order.slice(0, 3).includes(w)) top3++;
+    for (const k of TREND_FACTOR_KEYS) if (rank(k) <= 3) factorHits[k]++;
     const gait = (snap.meta && snap.meta.gait) || '?';
     const gr = gaitRows[gait] || (gaitRows[gait] = { n: 0, early: 0, close: 0 });
     gr.n++; if (isEarly) gr.early++; if (isClose) gr.close++;
@@ -632,7 +637,11 @@ function trendsInfo() {
     })
     .filter((p) => p.post >= 1 && p.post <= 20)
     .sort((a, b) => a.post - b.post);
-  return { n, early, close, lean, why, topWon, top3, posts, gaitRows };
+  // rank the other factors by how often tonight's winners also placed top-3 in them (early/close excluded — already their own row)
+  const factorRows = TREND_FACTOR_KEYS.filter((k) => k !== 'early' && k !== 'close')
+    .map((k) => ({ key: k, label: WEIGHT_LABELS[k] || k, hits: factorHits[k], n }))
+    .sort((a, b) => b.hits / b.n - a.hits / a.n || a.label.localeCompare(b.label));
+  return { n, early, close, lean, why, topWon, top3, posts, gaitRows, factorRows };
 }
 // v22 (#51): the same pace/post picture as trendsInfo(), but pooled across every graded race at this
 // track from every night anyone's used the site — not just tonight's card. Needs a real sample before
@@ -716,8 +725,14 @@ function renderTrends() {
     }).join('')}
   </tbody></table>`;
   const pickP = `<p class="note">Our top pick has won <b>${t.topWon}/${t.n}</b> (${pct(t.topWon, t.n)}) and landed in the top 3 of <b>${t.top3}/${t.n}</b> (${pct(t.top3, t.n)}) graded races so far tonight.</p>`;
+  // v25 (Marshall): beyond early/closing, what else do tonight's winners have in common — ranked by how
+  // often the winner also placed top-3 in that stat for their own race.
+  const factorHtml = `<table class="rec" style="margin-top:8px"><thead><tr><th>Stat</th><th>Winner also top-3</th></tr></thead><tbody>
+    ${t.factorRows.map((f) => `<tr><td>${esc(f.label)}</td><td><b>${f.hits}/${f.n}</b> (${pct(f.hits, f.n)})</td></tr>`).join('')}
+  </tbody></table>`;
   return `${head}
   <div class="panel"><h3>Pace tonight</h3>${paceRow}${leanP}${gaitHtml}</div>
+  <div class="panel" style="margin-top:12px"><h3>What else winners have in common</h3><p class="note">Every scored stat, ranked by how often tonight's winner also placed top-3 in it for their race — not just early/closing speed. Small sample tonight, so take the order loosely until it fills in.</p>${factorHtml}</div>
   <div class="panel" style="margin-top:12px"><h3>Posts tonight</h3><p class="note">Every horse that started, not just winners. "Model expected" is the usual post edge for this track/size; green rows are running hotter than that, pink rows colder. Under 3 starts isn't marked either way.</p>${postHtml}</div>
   <div class="panel" style="margin-top:12px"><h3>How our picks are doing</h3>${pickP}</div>${poolBlock}
   <p class="note" id="poolStatus" style="margin-top:10px">${poolStatusLine()}</p>`;
@@ -1791,7 +1806,7 @@ function methodHtml() {
   const wt = Object.entries(DEFAULT_WEIGHTS).map(([k, v]) => `${WEIGHT_LABELS[k].toLowerCase()} ${v}`).join(', ');
   return `<div class="panel method"><h3>How the numbers are built</h3>
   <p><b>Mile-adjusted times (*)</b>: every time is converted to a mile-track equivalent (half-mile −2.0s, ⅝ −1.0s, ⅞ −0.4s; quarters get ¼ of that), then corrected for the program's track variant (0.2s per point, capped at ±1.6s), which also covers off tracks.</p>
-  <p><b>Track normal</b>: "Normal" changes with the race. Half-mile tracks count early speed 1.75× and closing 0.6× (leavers, pocket and first-over horses win most there); ⅝ tracks early 1.25×, closing 0.9×; ⅞ early 0.9×, closing 1.25×; mile tracks early 0.75×, closing 1.5×. Trotters count early speed less (0.85×) and closing, form, class and post a little more. A track that plays fast or fair to closers tilts it further (Track book), and Dec–Mar cards lean slightly toward closers. Your own settings multiply on top.</p>
+  <p><b>Track normal</b>: "Normal" changes with the race. Half-mile tracks count early speed 1.75× and closing 0.6× (leavers, pocket and first-over horses win most there); ⅝ tracks early 1.25×, closing 0.9×; ⅞ early 0.9×, closing 1.25×; mile tracks early 0.75×, closing 1.5×. Trotters count their opening ¼ more (1.25×) and closing, form, class and post a little more too; pacers count their closing ¼ more (1.25×). A track that plays fast or fair to closers tilts it further (Track book), and Dec–Mar cards lean slightly toward closers. Your own settings multiply on top.</p>
   <p><b>Avg mark</b>: average final time over the last 4 starts, throwing out breaks, parked-out trips (3-wide at any call or first-over at 3+ calls), qualifiers and DNFs — only races from the last 120 days when there are any.</p>
   <p><b>Open ¼</b>: estimated time at the first quarter (leader's quarter + 0.2s per length behind) and average position there. <b>Close ¼</b>: the horse's own last quarter. <b>¾→Fin</b>: average spots gained or lost from the 3/4 call to the wire. <b>Avg fin L3</b>: average finish over the last 3 real starts (the score uses the last 4). <b>Speed</b> is one number: average speed rating 55%, average adjusted mile 25%, best rating 20%, last 4 clean starts. <b>Beaten lengths</b>, <b>last-start odds</b>, <b>days since last start</b> (7–21 best) and <b>track-size fit</b> (speed ratings on today's size vs his other sizes) also count.</p>
   <p><b>Post position</b> uses the track's real win rate from each post — the program's post table when it has one (fast or off, blended 75/25 with the last 30 days), else the horse's post rating, else the last table saved for that track, else a typical table for the size blended with your own results there. Half-mile: rail best, post 8 worst; ⅝: posts 4–5 best; ⅞ and mile: posts 5–6 best.</p>
