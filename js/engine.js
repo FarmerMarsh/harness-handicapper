@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=25';
+import { fmtTime } from './parse.js?v=26';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -42,8 +42,9 @@ export const SIZE_MULT = {
 export const SIZE_LABEL = { 0.5: 'half-mile', 0.625: '⅝-mile', 0.875: '⅞-mile', 1: 'mile' };
 // trotters: break more (penalty already harsher), outside posts worse, closing/form/class/post count a little more
 // v25 (Marshall): trotters should count their opening ¼ more, pacers their closing ¼ more — flipped early up for
-// trotters (was 0.85, under-weighted) and added a matching closing bump for pacers (had none before).
-export const GAIT_MULT = { TROT: { early: 1.25, pace: 0.85, close: 1.1, late: 1.1, form: 1.1, class: 1.1, post: 1.1 }, PACE: { close: 1.25 } };
+// trotters (was 0.85, under-weighted) and added a matching closing bump for pacers (had none before). Dialed
+// back from the initial 1.25× to 1.1× for both (Marshall, same day).
+export const GAIT_MULT = { TROT: { early: 1.1, pace: 0.85, close: 1.1, late: 1.1, form: 1.1, class: 1.1, post: 1.1 }, PACE: { close: 1.1 } };
 // a track that plays faster or fairer than its size
 export const PLAYS_MULT = {
   speed: { early: 1.25, pace: 1.25, close: 0.85, late: 0.85 },

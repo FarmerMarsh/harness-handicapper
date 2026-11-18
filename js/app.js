@@ -1,12 +1,12 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=25';
+import { parseProgram, fmtTime } from './parse.js?v=26';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=25';
-import { learnAll, learnedMult } from './learn.js?v=25';
-import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=25';
+} from './engine.js?v=26';
+import { learnAll, learnedMult } from './learn.js?v=26';
+import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=26';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -451,7 +451,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=25', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=26', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -1298,7 +1298,11 @@ function renderRace(n) {
     const g = gradeRace(snap, res.filter(Boolean).map(Number));
     const mark = (v) => (v == null ? '<span class="faint">no play</span>' : v ? '<span class="ok">hit</span>' : '<span class="no">miss</span>');
     const ls = g.ls.length ? ` · Longshots <span class="${g.ls.some(Boolean) ? 'ok' : 'no'}">${g.ls.filter(Boolean).length}/${g.ls.length} hit</span>` : '';
-    graded = `<div class="graded">Pick #${snap.order[0]}: ${g.win ? '<span class="ok">won</span>' : g.itm ? '<span class="ok">in the money</span>' : '<span class="no">out</span>'} · Exacta ${mark(g.exacta)} · Trifecta ${mark(g.trifecta)} · Superfecta ${mark(g.superfecta)}${ls}</div>`;
+    // v25 (Marshall): a KEY'd top pick has to win outright to count — 2nd/3rd is a miss, not partial "in the
+    // money" credit. A BOX'd top pick still gets "in the money" short of an outright win. Matches the quick grid.
+    const keyed = snap.plays.trifecta && snap.plays.trifecta.type === 'KEY';
+    const pickStatus = g.win ? '<span class="ok">won</span>' : keyed ? '<span class="no">miss</span>' : g.itm ? '<span class="ok">in the money</span>' : '<span class="no">out</span>';
+    graded = `<div class="graded">Pick #${snap.order[0]}: ${pickStatus} · Exacta ${mark(g.exacta)} · Trifecta ${mark(g.trifecta)} · Superfecta ${mark(g.superfecta)}${ls}</div>`;
   }
   return `
   <div class="racenav"><a class="btn small" href="#/">← Card</a>
@@ -1495,17 +1499,27 @@ function quickResultsGrid() {
     const scrSet = new Set(S.st.scratches[n] || []);
     const res = S.st.results[n] || [];
     const snap = S.st.snaps[n];
-    let status = '<span class="faint">—</span>';
+    let status = '<span class="faint">—</span>', tix = '<span class="faint">—</span>';
     if (snap && res.filter(Boolean).length) {
       const g = gradeRace(snap, res.filter(Boolean).map(Number));
-      status = g.win ? '<span class="ok">won</span>' : g.itm ? '<span class="ok">in the money</span>' : '<span class="no">out</span>';
+      // v25 (Marshall): a KEY'd top pick has to win outright to count — finishing 2nd or 3rd is a miss, not
+      // partial "in the money" credit. A BOX'd top pick still gets "in the money" short of an outright win.
+      const keyed = snap.plays.trifecta && snap.plays.trifecta.type === 'KEY';
+      status = g.win ? '<span class="ok">won</span>'
+        : keyed ? '<span class="no">miss</span>'
+        : g.itm ? '<span class="ok">in the money</span>'
+        : '<span class="no">out</span>';
+      // Exacta/trifecta hit already means "KEY'd horse won outright" / "BOX'd horses landed in any order" —
+      // legsHit() enforces that distinction, this just surfaces it as a quick green/red read.
+      const pill = (hit) => (hit == null ? '<span class="faint">—</span>' : hit ? '<span class="ok">hit</span>' : '<span class="no">miss</span>');
+      tix = `${pill(g.exacta)} / ${pill(g.trifecta)}`;
     }
     return `<tr><td><a href="#/race/${n}"><b>${n}</b></a></td><td class="muted">${esc(r.post_time || '')}<br>${esc(tc(r.gait))}</td>
       ${['1st', '2nd', '3rd', '4th'].map((lbl, i) => `<td><select data-res="${n}" data-pos="${i}" aria-label="Race ${n} ${lbl}">${resultOpts(r, scrSet, res[i])}</select></td>`).join('')}
-      <td>${status}</td></tr>`;
+      <td>${status}</td><td>${tix}</td></tr>`;
   }).join('');
-  return `<div class="panel"><h3>All races</h3><p class="note">Pick the finishing order for each race — grades instantly, no need to open the race page.</p>
-    <div class="htable-wrap"><table class="rec quickres"><thead><tr><th>Race</th><th>Post</th><th>1st</th><th>2nd</th><th>3rd</th><th>4th</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  return `<div class="panel"><h3>All races</h3><p class="note">Pick the finishing order for each race — grades instantly, no need to open the race page. "Ex / Tri" is hit/miss on the ticket we actually called (KEY needs that horse to win outright; BOX just needs the boxed horses to land, any order).</p>
+    <div class="htable-wrap"><table class="rec quickres"><thead><tr><th>Race</th><th>Post</th><th>1st</th><th>2nd</th><th>3rd</th><th>4th</th><th>Result</th><th>Ex / Tri</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
 }
 function renderResults() {
   const p = S.pasted;
@@ -1806,7 +1820,7 @@ function methodHtml() {
   const wt = Object.entries(DEFAULT_WEIGHTS).map(([k, v]) => `${WEIGHT_LABELS[k].toLowerCase()} ${v}`).join(', ');
   return `<div class="panel method"><h3>How the numbers are built</h3>
   <p><b>Mile-adjusted times (*)</b>: every time is converted to a mile-track equivalent (half-mile −2.0s, ⅝ −1.0s, ⅞ −0.4s; quarters get ¼ of that), then corrected for the program's track variant (0.2s per point, capped at ±1.6s), which also covers off tracks.</p>
-  <p><b>Track normal</b>: "Normal" changes with the race. Half-mile tracks count early speed 1.75× and closing 0.6× (leavers, pocket and first-over horses win most there); ⅝ tracks early 1.25×, closing 0.9×; ⅞ early 0.9×, closing 1.25×; mile tracks early 0.75×, closing 1.5×. Trotters count their opening ¼ more (1.25×) and closing, form, class and post a little more too; pacers count their closing ¼ more (1.25×). A track that plays fast or fair to closers tilts it further (Track book), and Dec–Mar cards lean slightly toward closers. Your own settings multiply on top.</p>
+  <p><b>Track normal</b>: "Normal" changes with the race. Half-mile tracks count early speed 1.75× and closing 0.6× (leavers, pocket and first-over horses win most there); ⅝ tracks early 1.25×, closing 0.9×; ⅞ early 0.9×, closing 1.25×; mile tracks early 0.75×, closing 1.5×. Trotters count their opening ¼ more (1.1×) and closing, form, class and post a little more too; pacers count their closing ¼ more (1.1×). A track that plays fast or fair to closers tilts it further (Track book), and Dec–Mar cards lean slightly toward closers. Your own settings multiply on top.</p>
   <p><b>Avg mark</b>: average final time over the last 4 starts, throwing out breaks, parked-out trips (3-wide at any call or first-over at 3+ calls), qualifiers and DNFs — only races from the last 120 days when there are any.</p>
   <p><b>Open ¼</b>: estimated time at the first quarter (leader's quarter + 0.2s per length behind) and average position there. <b>Close ¼</b>: the horse's own last quarter. <b>¾→Fin</b>: average spots gained or lost from the 3/4 call to the wire. <b>Avg fin L3</b>: average finish over the last 3 real starts (the score uses the last 4). <b>Speed</b> is one number: average speed rating 55%, average adjusted mile 25%, best rating 20%, last 4 clean starts. <b>Beaten lengths</b>, <b>last-start odds</b>, <b>days since last start</b> (7–21 best) and <b>track-size fit</b> (speed ratings on today's size vs his other sizes) also count.</p>
   <p><b>Post position</b> uses the track's real win rate from each post — the program's post table when it has one (fast or off, blended 75/25 with the last 30 days), else the horse's post rating, else the last table saved for that track, else a typical table for the size blended with your own results there. Half-mile: rail best, post 8 worst; ⅝: posts 4–5 best; ⅞ and mile: posts 5–6 best.</p>
