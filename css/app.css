@@ -254,6 +254,8 @@ table.ht { min-width: 1080px; }
 .order select { border: 1px solid var(--rule); border-radius: 8px; padding: 6px 8px; background: var(--card); font-weight: 700; color: var(--ink); }
 .graded { margin-top: 8px; font-size: 13.5px; }
 .ok { color: var(--green); font-weight: 700; } .no { color: var(--red); font-weight: 700; }
+table.quickres select { border: 1px solid var(--rule); border-radius: 7px; padding: 5px 6px; background: var(--card); font-weight: 700; color: var(--ink); min-width: 56px; }
+table.quickres td { white-space: nowrap; }
 @media (min-width: 760px) { .notes { grid-template-columns: 1.4fr 1fr; } }
 
 /* record + settings */
@@ -294,7 +296,11 @@ table.rec th { font-size: 12px; color: var(--muted); text-transform: uppercase; 
 /* ---------- print (landscape, one race per page) ---------- */
 /* The print pages are built off-screen at the real page width so each one can be measured and shrunk to fit. */
 .print-root { position: absolute; left: -20000px; top: 0; width: 10.36in; visibility: hidden; font-size: 8.4pt; color: var(--ink); background: var(--card); }
-.print-root .pp { width: 10.36in; overflow: hidden; }
+/* v24: the horse table (15 columns incl. Pros AND Cons) can be wider than the fixed page width, especially with
+   bigger fields. A clipped overflow:hidden box silently drops the Cons column off the right edge of the page —
+   so this lets the page box grow to its content's full natural width instead of clipping it; makePdf()'s
+   addImage() already scales the whole captured image down to fit the PDF page by aspect ratio, so nothing is lost. */
+.print-root .pp { min-width: 10.36in; width: max-content; overflow: visible; }
 .print-root .banner { border-radius: 6px; }
 .print-root .banner .num { width: 64px; } .print-root .banner .num span { font-size: 26px; }
 .print-root .banner .title { font-size: 13pt; } .print-root .banner .cond { font-size: 6.6pt; }
@@ -538,13 +544,6 @@ details.horse[open] > summary .h-line { display: none; }
   .pinbar .pt { color: #cfd6e4; font-size: 12px; }
   main { padding-bottom: 96px; }
 }
-.pay { margin: 10px 0 4px; }
-.pay .lbl { font-size: 10.5px; font-weight: 800; letter-spacing: .6px; color: var(--muted); margin-bottom: 4px; }
-.paygrid { display: flex; flex-wrap: wrap; gap: 8px 14px; }
-.paygrid label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
-.payin { display: inline-flex; align-items: center; gap: 4px; color: var(--ink); }
-.payin input { width: 78px; padding: 5px 7px; border: 1px solid var(--rule); border-radius: 6px; }
-.payin select { padding: 4px 4px; border: 1px solid var(--rule); border-radius: 6px; font-size: 12px; background: var(--card); }
 details.slip { margin-top: 6px; }
 details.slip > summary { cursor: pointer; font-weight: 700; font-size: 13.5px; width: fit-content; padding: 2px 0; }
 .sliptab td { vertical-align: top; padding: 5px 8px 5px 0; }
@@ -557,6 +556,4 @@ details.slip > summary { cursor: pointer; font-weight: 700; font-size: 13.5px; w
 .livegrid select { padding: 6px 6px; border: 1px solid var(--rule); border-radius: 6px; font: inherit; width: 100%; background: var(--card); }
 table.rec tr.tot td { font-weight: 700; border-top: 2px solid var(--rule); }
 
-/* v19: pick-ticket payouts */
 .row.tpay { margin-top: 8px; gap: 14px; flex-wrap: wrap; align-items: center; }
-.row.tpay select { padding: 4px 4px; border: 1px solid var(--rule); border-radius: 6px; font-size: 12px; background: var(--card); margin-left: 4px; }
