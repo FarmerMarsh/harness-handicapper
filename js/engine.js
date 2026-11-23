@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=26';
+import { fmtTime } from './parse.js?v=27';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -13,7 +13,7 @@ export const DEFAULT_WEIGHTS = {
   speed: 30,      // one speed number (v11): avg speed rating 55% + avg adjusted mile 25% + best rating 20%, clean last 4
   close: 12,      // avg adjusted last quarter
   early: 8,       // v17: how often he leaves (1st–3rd at the ¼), fitted to tonight's post and the leavers inside him, + ¼ position/time
-  form: 12,       // avg finish last 4 starts (v17: 16 → 12, hold-out check)
+  form: 14,       // avg finish last 3 starts (v17: 16 → 12, hold-out check; v27 (Marshall): window 4 → 3, weight 12 → 14)
   class: 8,       // class ratings faced + circuit tier + same-track purse move
   year: 8,        // current-year win / top-3 %
   driver: 7,      // driver UDR
@@ -103,7 +103,7 @@ export const FACTORS = [
   { key: 'early', group: 'weight', label: 'Opening speed (first ¼)', help: 'How often he leaves (1st–3rd at the quarter), adjusted for tonight\'s post and the other leavers, plus quarter position and time' },
   { key: 'close', group: 'weight', label: 'Closing speed (last ¼)', help: 'Horse\'s own last-quarter time' },
   { key: 'late', group: 'weight', label: 'Late move (¾→finish)', help: 'Spots gained or lost after the 3/4 call' },
-  { key: 'form', group: 'weight', label: 'Recent form', help: 'Average finish over the last 4 starts' },
+  { key: 'form', group: 'weight', label: 'Recent form', help: 'Average finish over the last 3 starts' },
   { key: 'beaten', group: 'weight', label: 'Beaten lengths', help: 'How far behind the winner, last 4 starts' },
   { key: 'fresh', group: 'weight', label: 'Days since last start', help: '7–21 days is best; long gaps also get the layoff penalty' },
   { key: 'odds', group: 'weight', label: 'Last-start odds', help: 'How the bettors rated him last time' },
@@ -120,11 +120,24 @@ export const FACTORS = [
   { key: 'pace', group: 'adj', label: 'Pace setup', help: 'Lone speed bonus, speed-duel penalty, closer boost in a hot pace' },
   { key: 'driver_change', group: 'adj', label: 'Driver change', help: 'Upgrade bonus / downgrade penalty vs last start' },
   { key: 'tough_trip', group: 'adj', label: 'Tough-trip credit', help: 'Bonus for parked or first-over trips that still finished close' },
+  { key: 'lasix', group: 'adj', label: 'First-time Lasix bump', help: 'Slight bonus for a horse making its first start on Lasix' },
   { key: 'breaks', group: 'pen', label: 'Break penalty', help: 'Breaking stride in recent starts — trotters count 10 starts back and are hit harder' },
   { key: 'layoff', group: 'pen', label: 'Layoff / stale-form penalty', help: 'Penalty for time off and old form lines' },
 ];
 export const POST_SCALE = { 0.5: 4, 0.625: 2.5, 0.875: 1.5, 1: 1 };
 export const DEFAULT_MULT = Object.fromEntries(FACTORS.map((f) => [f.key, 1]));
+// v27 (Marshall): the raw, human-readable number behind each scored factor (not the 0–1 field-relative composite),
+// so Trends can report a real range ("winners' opening ¼ ran 26.4–29.1") instead of a unitless 0–1 score.
+// 'post' has its own dedicated post-position table on Trends already, so it's left out here.
+export const TREND_RAW = {
+  speed: { field: 'sr_avg', unit: 'SR' }, close: { field: 'close_q', unit: 'sec' }, form: { field: 'avg_fin3', unit: 'avg finish' },
+  beaten: { field: 'beaten4', unit: 'lengths' }, odds: { field: 'last_odds', unit: '-1 odds' }, fresh: { field: 'days_real', unit: 'days' },
+  sizefit: { field: 'sizefit', unit: 'SR pts' }, early: { field: 'open_q', unit: 'sec' }, class: { field: 'class_val', unit: 'pts' },
+  late: { field: 'late_gain', unit: 'pos gained' }, year: { field: 'year_score', unit: 'score' },
+  driver: { field: 'driver_udr', unit: 'UDR' }, trainer: { field: 'trainer_w', unit: 'win%' },
+  trend: { field: 'sr_trend', unit: 'SR/start' }, hot: { field: 'hot_val', unit: 'score' }, conn: { field: 'conn_val', unit: 'score' },
+  offtrack: { field: 'off_val', unit: 'score' },
+};
 
 export const PRESETS = {
   normal: { label: 'Normal', mult: {} },
@@ -144,6 +157,7 @@ export const WEIGHT_LABELS = {
 export const ADJ = {
   lone_speed: 4, speed_duel: -2, closer_setup: 2, driver_up: 2, driver_up_big: 3,
   driver_down: -2, tough_trip: 2, tough_trip_cap: 4,
+  first_lasix: 1.5,  // v27 (Marshall): a slight bump for a horse making its first start on Lasix
 };
 
 // rough circuit tiers (1 = toughest); unknown tracks default to 3
@@ -815,7 +829,7 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
   CUR_TEMP = TEMP * (temp || 1);
   race.temp = CUR_TEMP;
   const grp = (key) => (key === 'lone_speed' || key === 'speed_duel' || key === 'closer_setup' ? 'pace'
-    : key.startsWith('driver_') ? 'driver_change' : 'tough_trip');
+    : key.startsWith('driver_') ? 'driver_change' : key === 'first_lasix' ? 'lasix' : 'tough_trip');
   let cur = null;
   const A = (key, v) => { const g = grp(key); cur.adjRaw[g] = (cur.adjRaw[g] || 0) + v; return v * (M[g] ?? 1); };
   const hs = race.horses.filter((h) => !scratched.includes(h.pgm));
@@ -886,11 +900,13 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
       }
     }
     if (m.tough.length) m.adj.push(['tough_trip', A('tough_trip', Math.min(ADJ.tough_trip_cap, ADJ.tough_trip * m.tough.length))]);
+    // v27 (Marshall): a horse making its first start on Lasix gets a slight overall bump.
+    if (h.equip_note && /1ST TIME LASIX|FIRST TIME LASIX/i.test(h.equip_note)) m.adj.push(['first_lasix', A('first_lasix', ADJ.first_lasix)]);
   }
   const col = (k) => hs.map((h) => h.m[k]);
   const comp = {
     speed: (() => { const a = norm(col('sr_avg')), b = norm(col('avg_mark'), false), c = norm(col('sr_best')); return a.map((x, i) => 0.55 * x + 0.25 * b[i] + 0.2 * c[i]); })(),
-    close: norm(col('close_q'), false), form: norm(col('avg_fin4'), false),
+    close: norm(col('close_q'), false), form: norm(col('avg_fin3'), false),
     beaten: norm(col('beaten4'), false), odds: norm(col('odds_val'), true, 0.45), fresh: hs.map((h) => h.m.fresh_val ?? 0.5),
     sizefit: norm(col('sizefit'), true, 0.45),
     early: (() => { const a = norm(col('open_pos'), false), b = norm(col('open_q'), false); return a.map((x, i) => 0.6 * (hs[i].m.early_val ?? 0.25) + 0.2 * x + 0.2 * b[i]); })(),
@@ -914,7 +930,9 @@ export function scoreRace(race, { today, year, mult, driverTable, scratched = []
     const thin = m.clean_n <= 1 ? 4 : 0;
     const pen = brk * M.breaks + lay * M.layoff + thin;
     h.feat = { c: Object.fromEntries(Object.keys(DEFAULT_WEIGHTS).map((k) => [k, comp[k] ? +comp[k][i].toFixed(4) : 0])),
-      a: { ...m.adjRaw }, p: { breaks: brk, layoff: lay, thin }, off: cond === 'off', b: B };
+      a: { ...m.adjRaw }, p: { breaks: brk, layoff: lay, thin }, off: cond === 'off', b: B,
+      // v27 (Marshall): raw per-factor numbers for the Trends "winners' performance range" stat.
+      raw: Object.fromEntries(Object.entries(TREND_RAW).map(([k, { field }]) => [k, m[field] != null ? +(+m[field]).toFixed(3) : null])) };
     const bonus = m.adj.reduce((a, [, v]) => a + v, 0);
     h.score = pyRound(s - pen + bonus, 1);
     h.bonus = bonus; h.penalty = pen;
@@ -1060,6 +1078,7 @@ function prosCons(h, hs, race, year) {
   if ('lone_speed' in tags) P('Lone speed: only true early horse in the field', 3, 'Trip/Post');
   if ('speed_duel' in tags) C(`Speed duel likely with ${race.pace.early.filter((x) => x !== h.pgm).map((x) => '#' + x).join(', ')}`, 2, 'Trip/Post');
   if ('closer_setup' in tags) P('Hot pace up front sets up his late kick', 2, 'Trip/Post');
+  if ('first_lasix' in tags) P('First time Lasix', 1, 'Form');
   const tp = race.trip;
   if (tp && !('lone_speed' in tags)) {
     if (m.trip_role === 'leader' && tp.shape !== 'contested' && tp.shape !== 'soft') P('Projected leader — should make the front', 2, 'Trip/Post');

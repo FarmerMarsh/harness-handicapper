@@ -1,12 +1,12 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=26';
+import { parseProgram, fmtTime } from './parse.js?v=27';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
-  SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold,
-} from './engine.js?v=26';
-import { learnAll, learnedMult } from './learn.js?v=26';
-import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=26';
+  SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold, TREND_RAW,
+} from './engine.js?v=27';
+import { learnAll, learnedMult } from './learn.js?v=27';
+import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=27';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -168,7 +168,7 @@ function weightsBadgeUser() {
 const GROUPS = [
   { id: 'speed', label: 'Speed', keys: ['speed', 'trend', 'sizefit'], help: 'Speed ratings and adjusted mile times (last 4 clean), speed trend, track-size fit' },
   { id: 'pace', label: 'Pace style', pace: true, help: 'Slide toward closers or toward early speed — on top of what the track size already does' },
-  { id: 'form', label: 'Form', keys: ['form', 'beaten', 'year', 'fresh'], help: 'Last 4 finishes, beaten lengths, this-year record, days since last start' },
+  { id: 'form', label: 'Form', keys: ['form', 'beaten', 'year', 'fresh'], help: 'Last 3 finishes, beaten lengths, this-year record, days since last start' },
   { id: 'class', label: 'Class', keys: ['class', 'odds'], help: 'Class faced, circuit and purse moves, last-start odds' },
   { id: 'conn', label: 'Driver / trainer', keys: ['driver', 'trainer', 'hot', 'conn', 'driver_change'], help: 'Driver UDR, trainer win %, hot/cold, team and barn moves, driver changes' },
   { id: 'post', label: 'Post & trip', keys: ['post', 'tough_trip'], help: 'Post-position win rate at this track, credit for tough trips' },
@@ -451,7 +451,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=26', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=27', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -594,19 +594,32 @@ function trendsInfo() {
   if (!S.key) return null;
   const races = gradedRaces();
   if (races.length < 3) return { n: races.length };
-  let early = 0, close = 0, topWon = 0, top3 = 0;
+  let early = 0, close = 0, both = 0, topWon = 0, top3 = 0;
   const postRows = new Map();   // post -> { starts, wins, idxSum, idxN }
   const gaitRows = {};          // gait -> { n, early, close }
   const factorHits = Object.fromEntries(TREND_FACTOR_KEYS.map((k) => [k, 0]));
+  // v27 (Marshall): the range of each factor's raw value actually seen among tonight's winners —
+  // "no winner has opened slower than X", generalized to every scored factor.
+  const rawRange = Object.fromEntries(Object.keys(TREND_RAW).map((k) => [k, { lo: null, hi: null, n: 0 }]));
   for (const g of races) {
     const { snap, w } = g;
     const rank = (k) => { const v = snap.feat.map(([p, f]) => [p, (f && f.c && f.c[k]) ?? 0.5]).sort((a, b) => b[1] - a[1]); return v.findIndex(([p]) => p === w) + 1; };
     const isEarly = rank('early') <= 3, isClose = rank('close') <= 3;
     if (isEarly) early++;
     if (isClose) close++;
+    if (isEarly && isClose) both++;
     if (snap.order && snap.order[0] === w) topWon++;
     if (snap.order && snap.order.slice(0, 3).includes(w)) top3++;
     for (const k of TREND_FACTOR_KEYS) if (rank(k) <= 3) factorHits[k]++;
+    const winFeat = (snap.feat.find(([p]) => p === w) || [])[1];
+    if (winFeat && winFeat.raw) {
+      for (const k of Object.keys(TREND_RAW)) {
+        const v = winFeat.raw[k];
+        if (v == null) continue;
+        const r = rawRange[k];
+        r.n++; r.lo = r.lo == null ? v : Math.min(r.lo, v); r.hi = r.hi == null ? v : Math.max(r.hi, v);
+      }
+    }
     const gait = (snap.meta && snap.meta.gait) || '?';
     const gr = gaitRows[gait] || (gaitRows[gait] = { n: 0, early: 0, close: 0 });
     gr.n++; if (isEarly) gr.early++; if (isClose) gr.close++;
@@ -641,7 +654,13 @@ function trendsInfo() {
   const factorRows = TREND_FACTOR_KEYS.filter((k) => k !== 'early' && k !== 'close')
     .map((k) => ({ key: k, label: WEIGHT_LABELS[k] || k, hits: factorHits[k], n }))
     .sort((a, b) => b.hits / b.n - a.hits / a.n || a.label.localeCompare(b.label));
-  return { n, early, close, lean, why, topWon, top3, posts, gaitRows, factorRows };
+  // v27: the raw lowest/highest value seen among tonight's winners for every scored factor (needs 3+ winners
+  // with that raw value recorded — older snapshots from before v27 won't have .raw, so n can lag behind the card's n).
+  const rangeRows = Object.keys(TREND_RAW)
+    .map((k) => ({ key: k, label: WEIGHT_LABELS[k] || k, unit: TREND_RAW[k].unit, ...rawRange[k] }))
+    .filter((r) => r.n >= 3)
+    .sort((a, b) => a.label.localeCompare(b.label));
+  return { n, early, close, both, lean, why, topWon, top3, posts, gaitRows, factorRows, rangeRows };
 }
 // v22 (#51): the same pace/post picture as trendsInfo(), but pooled across every graded race at this
 // track from every night anyone's used the site — not just tonight's card. Needs a real sample before
@@ -707,6 +726,7 @@ function renderTrends() {
   const paceRow = `<div class="row note" style="gap:16px;flex-wrap:wrap">
     <span><b>${t.early}/${t.n}</b> winners (${pct(t.early, t.n)}) were top-3 on early speed</span>
     <span><b>${t.close}/${t.n}</b> winners (${pct(t.close, t.n)}) were top-3 closers</span>
+    <span><b>${t.both}/${t.n}</b> winners (${pct(t.both, t.n)}) were top-3 on <b>both</b></span>
   </div>`;
   const leanP = t.why
     ? `<p class="note" style="margin-top:6px"><b>${esc(t.why)}.</b> ${t.n < 5 ? "Still a small sample — light tilt only." : "Worth leaning on for the rest of the card."}</p>`
@@ -730,9 +750,16 @@ function renderTrends() {
   const factorHtml = `<table class="rec" style="margin-top:8px"><thead><tr><th>Stat</th><th>Winner also top-3</th></tr></thead><tbody>
     ${t.factorRows.map((f) => `<tr><td>${esc(f.label)}</td><td><b>${f.hits}/${f.n}</b> (${pct(f.hits, f.n)})</td></tr>`).join('')}
   </tbody></table>`;
+  // v27 (Marshall): "no winner has opened slower than X" generalized to every scored factor — the actual
+  // lowest/highest raw value seen among tonight's winners, not a rank-based hit-rate like the table above.
+  const fmtRaw = (v, unit) => v == null ? '—' : unit === 'win%' ? `${Math.round(v)}%` : unit === 'days' ? `${Math.round(v)}` : unit === 'UDR' || unit === 'score' ? v.toFixed(3) : `${Math.round(v * 10) / 10}`;
+  const rangeHtml = t.rangeRows.length ? `<table class="rec" style="margin-top:8px"><thead><tr><th>Stat</th><th>Lowest (winner)</th><th>Highest (winner)</th><th>Unit</th><th>n</th></tr></thead><tbody>
+    ${t.rangeRows.map((r) => `<tr><td>${esc(r.label)}</td><td>${fmtRaw(r.lo, r.unit)}</td><td>${fmtRaw(r.hi, r.unit)}</td><td class="muted">${esc(r.unit)}</td><td>${r.n}</td></tr>`).join('')}
+  </tbody></table>` : `<p class="note">Needs 3+ graded races entered since this update before a range shows up here.</p>`;
   return `${head}
   <div class="panel"><h3>Pace tonight</h3>${paceRow}${leanP}${gaitHtml}</div>
   <div class="panel" style="margin-top:12px"><h3>What else winners have in common</h3><p class="note">Every scored stat, ranked by how often tonight's winner also placed top-3 in it for their race — not just early/closing speed. Small sample tonight, so take the order loosely until it fills in.</p>${factorHtml}</div>
+  <div class="panel" style="margin-top:12px"><h3>Winners' performance range</h3><p class="note">The actual lowest and highest value tonight's winners have shown in each stat — e.g. "no winner has opened slower than X." Needs 3+ winners with that stat recorded; the n column can lag the card's graded-race count for stats that aren't always available (e.g. a horse with no recent off-track line).</p>${rangeHtml}</div>
   <div class="panel" style="margin-top:12px"><h3>Posts tonight</h3><p class="note">Every horse that started, not just winners. "Model expected" is the usual post edge for this track/size; green rows are running hotter than that, pink rows colder. Under 3 starts isn't marked either way.</p>${postHtml}</div>
   <div class="panel" style="margin-top:12px"><h3>How our picks are doing</h3>${pickP}</div>${poolBlock}
   <p class="note" id="poolStatus" style="margin-top:10px">${poolStatusLine()}</p>`;
@@ -1822,7 +1849,7 @@ function methodHtml() {
   <p><b>Mile-adjusted times (*)</b>: every time is converted to a mile-track equivalent (half-mile −2.0s, ⅝ −1.0s, ⅞ −0.4s; quarters get ¼ of that), then corrected for the program's track variant (0.2s per point, capped at ±1.6s), which also covers off tracks.</p>
   <p><b>Track normal</b>: "Normal" changes with the race. Half-mile tracks count early speed 1.75× and closing 0.6× (leavers, pocket and first-over horses win most there); ⅝ tracks early 1.25×, closing 0.9×; ⅞ early 0.9×, closing 1.25×; mile tracks early 0.75×, closing 1.5×. Trotters count their opening ¼ more (1.1×) and closing, form, class and post a little more too; pacers count their closing ¼ more (1.1×). A track that plays fast or fair to closers tilts it further (Track book), and Dec–Mar cards lean slightly toward closers. Your own settings multiply on top.</p>
   <p><b>Avg mark</b>: average final time over the last 4 starts, throwing out breaks, parked-out trips (3-wide at any call or first-over at 3+ calls), qualifiers and DNFs — only races from the last 120 days when there are any.</p>
-  <p><b>Open ¼</b>: estimated time at the first quarter (leader's quarter + 0.2s per length behind) and average position there. <b>Close ¼</b>: the horse's own last quarter. <b>¾→Fin</b>: average spots gained or lost from the 3/4 call to the wire. <b>Avg fin L3</b>: average finish over the last 3 real starts (the score uses the last 4). <b>Speed</b> is one number: average speed rating 55%, average adjusted mile 25%, best rating 20%, last 4 clean starts. <b>Beaten lengths</b>, <b>last-start odds</b>, <b>days since last start</b> (7–21 best) and <b>track-size fit</b> (speed ratings on today's size vs his other sizes) also count.</p>
+  <p><b>Open ¼</b>: estimated time at the first quarter (leader's quarter + 0.2s per length behind) and average position there. <b>Close ¼</b>: the horse's own last quarter. <b>¾→Fin</b>: average spots gained or lost from the 3/4 call to the wire. <b>Avg fin L3</b>: average finish over the last 3 real starts — this is also what the Form score now uses (v27: was the last 4). <b>Speed</b> is one number: average speed rating 55%, average adjusted mile 25%, best rating 20%, last 4 clean starts. <b>Beaten lengths</b>, <b>last-start odds</b>, <b>days since last start</b> (7–21 best) and <b>track-size fit</b> (speed ratings on today's size vs his other sizes) also count.</p>
   <p><b>Post position</b> uses the track's real win rate from each post — the program's post table when it has one (fast or off, blended 75/25 with the last 30 days), else the horse's post rating, else the last table saved for that track, else a typical table for the size blended with your own results there. Half-mile: rail best, post 8 worst; ⅝: posts 4–5 best; ⅞ and mile: posts 5–6 best.</p>
   <p><b>Speed trend</b>: the slope of speed figures over the last 3–4 starts without a break — rising horses get credit, sliding ones lose it. <b>Hot / cold</b>: driver UDR and trainer UTR over the last 30 days vs the year. <b>Connections &amp; course</b>: the driver/trainer team's record together, the horse's record at this track, and a first or second start for a new barn (better or weaker trainer). <b>Off-track</b> (only when the track is set to Off): the horse's off-track record vs its overall record, plus the sire's off-track win rate. <b>Trotters</b>: breaks count over the last 10 lines (qualifiers too), a break last time adds more, and a trotter with no breaks in its last 6+ starts gets a pro.</p>
   <p><b>Woodbine / Standardbred Canada programs</b> (Mohawk, Georgian, Flamboro…): cover, ad and how-to-bet pages are skipped. They print only this year and last year, so the "Life" win % and top-3 % are those two seasons (the lifetime mark and earnings are the real ones). Speed figures are built from the time like USTA programs. The program's own winning-post-position table (pace and trot separately), "Who's hot" drivers (last 20 days), driver/trainer combination stats and late driver changes are all read in.</p>

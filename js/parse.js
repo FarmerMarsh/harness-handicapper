@@ -371,7 +371,7 @@ export async function parseProgram(pdfDoc) {
         if (nxt) { const r = nxt.text.match(/([+-]?\d+)/); if (r) h.post_rating = parseInt(r[1], 10); }
       }
       const allText = bw.map((w) => w.text).join(' ');
-      h.equip_note = (allText.match(/(HOPPLES OFF|1ST TIME LASIX|LASIX OFF)/g) || []).join(' ');
+      h.equip_note = (allText.match(/(HOPPLES OFF|1ST TIME LASIX|FIRST TIME LASIX|LASIX OFF)/gi) || []).join(' ');
       const anchors = [...new Set(bw.filter((w) => w.x0 >= 55 && w.x0 < 66 && /^\d\d[A-Z][a-z]{2}\d\d$/.test(w.text))
         .map((w) => Math.round(w.top * 10) / 10))].sort((a, b) => a - b);
       const rows = anchors.length ? clusterRows(bw.filter((w) => w.top > rowsStart - 2 && w.x0 > 45), anchors) : new Map();
@@ -602,7 +602,7 @@ async function parseUSTA(pdfDoc) {
       h.trn_st = ts ? ts.st : null; h.trn_w = ts && ts.st ? Math.round((100 * ts.w) / ts.st) : null; h.trn_utr = ts ? ts.r : null;
       h.stats = ustaStats(bw);
       h.post_rating = null;
-      h.equip_note = '';
+      h.equip_note = (bw.map((w) => w.text).join(' ').match(/(HOPPLES OFF|1ST TIME LASIX|FIRST TIME LASIX|LASIX OFF)/gi) || []).join(' ');
       // past performance lines: each starts with a date "10-29" (or "10-" + day) at the left edge
       const anchors = bw.filter((w) => w.x0 < 24 && /^\d{1,2}-(\d{1,2})?$/.test(w.text)).sort((a, b) => a.top - b.top);
       h.pp = anchors.map((a, k) => {
@@ -869,7 +869,7 @@ async function parseWoodbine(pdfDoc) {
       h.earn_l5 = l4w.length ? parseInt(l4w[0].text.replace(/[$,]/g, ''), 10) : null;
       void l4;
       h.post_rating = null;
-      h.equip_note = '';
+      h.equip_note = (bw.map((w) => w.text).join(' ').match(/(HOPPLES OFF|1ST TIME LASIX|FIRST TIME LASIX|LASIX OFF)/gi) || []).join(' ');
       const anchors = bw.filter((w) => w.x0 < 30 && /^[A-Z][a-z]{2}\d{1,2}$/.test(w.text) && w.text.slice(0, 3) in WMONS).sort((a, b) => a.top - b.top);
       h.pp = anchors.map((a, k) => {
         const hi = k + 1 < anchors.length ? anchors[k + 1].top - 1 : b1;
