@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=27';
+import { fmtTime } from './parse.js?v=28';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -1078,7 +1078,8 @@ function prosCons(h, hs, race, year) {
   if ('lone_speed' in tags) P('Lone speed: only true early horse in the field', 3, 'Trip/Post');
   if ('speed_duel' in tags) C(`Speed duel likely with ${race.pace.early.filter((x) => x !== h.pgm).map((x) => '#' + x).join(', ')}`, 2, 'Trip/Post');
   if ('closer_setup' in tags) P('Hot pace up front sets up his late kick', 2, 'Trip/Post');
-  if ('first_lasix' in tags) P('First time Lasix', 1, 'Form');
+  // v27-fix: no separate "First time Lasix" pro here — it duplicated the equip_note-derived
+  // pro below (line ~1187) and the two competed for the same low-importance Form slot.
   const tp = race.trip;
   if (tp && !('lone_speed' in tags)) {
     if (m.trip_role === 'leader' && tp.shape !== 'contested' && tp.shape !== 'soft') P('Projected leader — should make the front', 2, 'Trip/Post');

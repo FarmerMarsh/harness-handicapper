@@ -965,7 +965,10 @@ async function parseWoodbine(pdfDoc) {
       h.listed_driver = h.driver;
       if (st) Object.assign(h, st); else { h.driver = newName; h.drv_st = null; h.drv_w = null; h.drv_udr = null; }
       h.drv30 = undefined;
-      h.equip_note = `Driver change: ${h.listed_driver} → ${h.driver}`;
+      // v27-fix: append rather than overwrite — this used to wipe out a Lasix/hopples
+      // equip note already parsed for this horse, silently dropping the v27 Lasix bump
+      // for any horse that both had a late driver change and a printed Lasix note.
+      h.equip_note = [h.equip_note, `Driver change: ${h.listed_driver} → ${h.driver}`].filter(Boolean).join(' · ');
     }
   }
   const names = [...new Set(card.races.flatMap((r) => r.horses.flatMap((h) => [h.driver, h.trainer, h.listed_driver])).filter(Boolean))];
