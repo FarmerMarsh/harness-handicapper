@@ -1,12 +1,12 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=31';
+import { parseProgram, fmtTime } from './parse.js?v=32';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold, TREND_RAW,
-} from './engine.js?v=31';
-import { learnAll, learnedMult } from './learn.js?v=31';
-import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=31';
+} from './engine.js?v=32';
+import { learnAll, learnedMult } from './learn.js?v=32';
+import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=32';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -451,7 +451,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=31', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=32', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -1001,10 +1001,11 @@ function allStates() {
 const HL = {
   life: [(m) => m.life_mark_adj, -1], yr: [(m) => m.yr_mark_adj, -1], avg: [(m) => m.avg_mark, -1],
   open: [(m) => m.open_q, -1], close: [(m) => m.close_q, -1], late: [(m) => m.late_gain, 1], fin: [(m) => m.avg_fin3, -1],
-  // v31 (Marshall): colored by fresh_val, the 7–21-day sweet-spot score — not raw days — so a horse right in the
-  // sweet spot bands green even though it isn't the single freshest or single most-rested horse in the field. The
-  // displayed text is still the raw day count (see statCells' 'Days off'); only the color comes from this.
-  fresh: [(m) => m.fresh_val, 1],
+  // v31 (Marshall), fixed same version: colored by fresh_disp, the 7–21-day sweet-spot score computed from
+  // days_real (days since the last REAL start) — not raw days, and NOT fresh_val (that one is based on
+  // days_any, which counts a recent qualifier as freshness and was wrongly banding long-real-layoff horses
+  // green if they'd qualified recently). The displayed text is still the raw real-start day count.
+  fresh: [(m) => m.fresh_disp, 1],
   lw: [(m) => (m.life_starts >= 5 ? m.life_win : null), 1], lt: [(m) => (m.life_starts >= 5 ? m.life_top3 : null), 1],
   yw: [(m) => (m.yr_starts >= 3 ? m.yr_win : null), 1], yt: [(m) => (m.yr_starts >= 3 ? m.yr_top3 : null), 1],
   cls: [(m) => m.cr_avg3, 1],

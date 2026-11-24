@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=31';
+import { fmtTime } from './parse.js?v=32';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -288,6 +288,13 @@ export function horseMetrics(h, race, today, year) {
   m.qual_since = !!(starts.length && starts[0].qua && real.length);
   const dd = m.days_any;
   m.fresh_val = dd == null ? null : dd < 6 ? 0.8 : dd <= 21 ? 1 : dd <= 35 ? 0.75 : dd <= 60 ? 0.45 : 0.2;
+  // v31 fix (Marshall): fresh_val above is deliberately based on days_any (counts a recent qualifier as
+  // "activity"), so it's the right thing for scoring. But the "Days off" column displays days_real (days
+  // since the last REAL start) — a horse that qualified recently but hasn't raced for real in 60+ days was
+  // showing a stale day count colored green, because fresh_val read it as fresh off the qualifier. This is
+  // the same 7–21-day sweet-spot bucketing, applied to days_real instead, used only to color that column.
+  const dr = m.days_real;
+  m.fresh_disp = dr == null ? null : dr < 6 ? 0.8 : dr <= 21 ? 1 : dr <= 35 ? 0.75 : dr <= 60 ? 0.45 : 0.2;
   // track-size fit: speed ratings at today's size vs his other sizes (last 10 real, no breaks)
   const sz = real.slice(0, 10).filter((p) => p.sr && !p.brk && !p.dnf && p.size);
   const here = sz.filter((p) => p.size === race.track_size), there = sz.filter((p) => p.size !== race.track_size);
