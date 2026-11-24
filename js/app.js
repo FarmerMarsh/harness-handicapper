@@ -1,12 +1,12 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { parseProgram, fmtTime } from './parse.js?v=30';
+import { parseProgram, fmtTime } from './parse.js?v=31';
 import {
   scoreRace, cardDate, cardDriverTable, DEFAULT_WEIGHTS, WEIGHT_LABELS, ADJ, FACTORS, DEFAULT_MULT, PRESETS,
   multiRaceBets, buildMultiTicket, linearScore, legsHit, legsText, TEMP,
   SIZE_MULT, SIZE_LABEL, GAIT_MULT, PLAYS_MULT, COLD_MULT, TRACK_INFO, GENERIC_POST, isCold, TREND_RAW,
-} from './engine.js?v=30';
-import { learnAll, learnedMult } from './learn.js?v=30';
-import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=30';
+} from './engine.js?v=31';
+import { learnAll, learnedMult } from './learn.js?v=31';
+import { pushToPool, pullPool, poolRowToLearnRow, poolKeyFor, normKey, ymd, firstRun, poolStatus as poolStatusRaw } from './sync.js?v=31';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -451,7 +451,7 @@ function learnRows() {
 let LW = null;
 function learnWorker() {
   if (LW !== null) return LW;
-  try { LW = new Worker(new URL('./learnworker.js?v=30', import.meta.url), { type: 'module' }); } catch { LW = false; }
+  try { LW = new Worker(new URL('./learnworker.js?v=31', import.meta.url), { type: 'module' }); } catch { LW = false; }
   return LW;
 }
 // re-learn a moment after results change (debounced so live entry doesn't thrash)
@@ -1001,9 +1001,16 @@ function allStates() {
 const HL = {
   life: [(m) => m.life_mark_adj, -1], yr: [(m) => m.yr_mark_adj, -1], avg: [(m) => m.avg_mark, -1],
   open: [(m) => m.open_q, -1], close: [(m) => m.close_q, -1], late: [(m) => m.late_gain, 1], fin: [(m) => m.avg_fin3, -1],
+  // v31 (Marshall): colored by fresh_val, the 7–21-day sweet-spot score — not raw days — so a horse right in the
+  // sweet spot bands green even though it isn't the single freshest or single most-rested horse in the field. The
+  // displayed text is still the raw day count (see statCells' 'Days off'); only the color comes from this.
+  fresh: [(m) => m.fresh_val, 1],
   lw: [(m) => (m.life_starts >= 5 ? m.life_win : null), 1], lt: [(m) => (m.life_starts >= 5 ? m.life_top3 : null), 1],
   yw: [(m) => (m.yr_starts >= 3 ? m.yr_win : null), 1], yt: [(m) => (m.yr_starts >= 3 ? m.yr_top3 : null), 1],
   cls: [(m) => m.cr_avg3, 1],
+  // v31 (Marshall): same 15+ start reliability bar the existing "Strong/Weak barn" pro/con already uses — a trainer
+  // with too few recorded starts (and a known count) doesn't get colored at all, rather than banding an unreliable %.
+  trn: [(m, h) => ((h.trn_st == null || h.trn_st >= 15) ? h.trn_w : null), 1],
   tmp: [(m, h) => h.tm?.power, 1], tms: [(m, h) => h.tm?.speed, 1], tmc: [(m, h) => h.tm?.pace, 1], tmk: [(m, h) => h.tm?.class, 1],
 };
 function highlights(r) {
@@ -1169,6 +1176,7 @@ function statCells(h, hl) {
     ['Close ¼*', m.close_q ? hv(c('close'), m.close_q.toFixed(1)) : '—', m.close_best ? `best ${m.close_best.toFixed(1)}` : ''],
     ['¾→Fin', m.late_gain == null ? '—' : hv(c('late'), lateTxt), lp],
     ['Avg fin L3', m.avg_fin3 ? hv(c('fin'), m.avg_fin3.toFixed(1)) : '—', m.fins3.join('-')],
+    ['Days off', m.days_real != null ? hv(c('fresh'), `${m.days_real}d`) : '—', 'ideal 7–21d'],
     ['Life W/T3', wt(m.life_win, m.life_top3, 'lw', 'lt'), `${m.life_starts} starts`],
     [`${yy} W/T3`, wt(m.yr_win, m.yr_top3, 'yw', 'yt'), `${m.yr_starts} starts`],
     ['Class', m.cr_avg3 != null ? hv(c('cls'), Math.round(m.cr_avg3)) : '—', m.cr_avg3 != null ? 'avg CR faced' : ''],
@@ -1213,7 +1221,7 @@ function horseCard(h, r, scr, hl) {
       <button class="scrbtn ${scr ? 'on' : ''}" data-scr="${h.pgm}" aria-pressed="${scr}">${scr ? 'Scratched' : 'Scratch'}</button>
       <div class="h-pgm">${h.pgm}</div>
       <div style="min-width:0"><div class="h-name">${esc(tc(h.name))} ${scr ? '' : valueTag(h)}</div>
-        <div class="h-sub">${esc(tc(h.driver))}${h.drv_w != null ? ` (${h.drv_w}%)` : ''} · ${esc(tc(h.trainer))}${h.trn_w != null ? ` (${h.trn_w}%)` : ''}</div>
+        <div class="h-sub">${esc(tc(h.driver))}${h.drv_w != null ? ` (${h.drv_w}%)` : ''} · ${esc(tc(h.trainer))}${h.trn_w != null ? ` (${hv(hlClass(hl, 'trn', h.pgm), `${h.trn_w}%`)})` : ''}</div>
         <div class="h-extra">${esc(extraLine(h))}</div>${scr ? '' : `<div class="h-extra">${tmLine(h, hl)}</div>${connLine(h)}`}</div>
       <div class="h-right">${proj}<div class="h-ml">ML ${esc(h.ml)}${!scr && h.line ? ` · line ${esc(h.line)}` : ''}</div></div>
     </div>${one}</summary>
@@ -1225,7 +1233,7 @@ function horseCard(h, r, scr, hl) {
 function horseTable(r, sorted, scrSet, forPrint = false) {
   const hl = highlights(r);
   const yy = String(S.year).slice(2);
-  const head = ['Scr', '#', 'Horse / Driver · Trainer', 'ML', 'Proj', 'Life mark', `'${yy} mark`, 'Avg mark*', 'Open ¼*', 'Close ¼*', '¾→Fin', 'Avg fin L3', 'Life W/T3', `'${yy} W/T3`, 'Pros', 'Cons'];
+  const head = ['Scr', '#', 'Horse / Driver · Trainer', 'ML', 'Proj', 'Life mark', `'${yy} mark`, 'Avg mark*', 'Open ¼*', 'Close ¼*', '¾→Fin', 'Avg fin L3', 'Days off', 'Life W/T3', `'${yy} W/T3`, 'Pros', 'Cons'];
   const rows = sorted.map((h) => {
     const scr = scrSet.has(h.pgm);
     const cls = scr ? 'scr' : h.rank === 1 ? 'r1' : h.rank <= 3 ? 'r23' : '';
@@ -1235,10 +1243,10 @@ function horseTable(r, sorted, scrSet, forPrint = false) {
     const vt = scr ? '' : h.value === 'good' ? '<span class="s gv">good value</span>' : h.value === 'bad' ? '<span class="s bv">bad value</span>' : '';
     return `<tr class="${cls}">
       <td>${scrCell}</td><td><b style="font-size:1.15em">${h.pgm}</b></td>
-      <td class="l"><span class="h-name"><b>${esc(tc(h.name))}</b></span><span class="s">${esc(tc(h.driver))} · ${esc(tc(h.trainer))}</span><span class="s faint">${esc(extraLine(h))}</span>${scr ? '' : `<span class="s">${tmLine(h, hl)}</span>${connLine(h, 's')}`}</td>
+      <td class="l"><span class="h-name"><b>${esc(tc(h.name))}</b></span><span class="s">${esc(tc(h.driver))} · ${esc(tc(h.trainer))}${h.trn_w != null ? ` (${hv(hlClass(hl, 'trn', h.pgm), `${h.trn_w}%`)})` : ''}</span><span class="s faint">${esc(extraLine(h))}</span>${scr ? '' : `<span class="s">${tmLine(h, hl)}</span>${connLine(h, 's')}`}</td>
       <td>${esc(h.ml)}${vt}</td>
       <td>${scr ? 'SCR' : `<b>${h.rank}</b><span class="s">${Math.round(h.win_prob * 100)}%</span>`}</td>
-      ${[0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => `<td>${c(i)}</td>`).join('')}
+      ${[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => `<td>${c(i)}</td>`).join('')}
       <td class="pcol">${!scr && h.pros ? pcList(h.pros, 'pro') : ''}</td><td class="pcol">${!scr && h.cons ? pcList(h.cons, 'con') : ''}</td>
     </tr>`;
   }).join('');

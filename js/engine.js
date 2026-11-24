@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=30';
+import { fmtTime } from './parse.js?v=31';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -19,10 +19,12 @@ export const DEFAULT_WEIGHTS = {
   driver: 7,      // driver UDR
   trainer: 3,     // trainer win %
   post: 7,        // the track's real post-position win index (front page / program post rating)
-  late: 4,        // avg spots gained 3/4 -> finish
+  late: 0,        // v31 (Marshall): dropped from scoring — not a reliable way to judge closers; closing 1/4 time
+                  // (the 'close' weight above) is. The ¾→Fin stat, its Gains/Fades late pro/con lines, and tonight's
+                  // pace-lean tilt logic are untouched — purely informational trip context now, no score weight.
   trend: 4,       // (v17: 10 → 4 — no predictive value in the hold-out check) speed figures rising or falling over the last 3–4 starts
   hot: 5,         // driver & trainer last 30 days vs the year
-  conn: 5,        // driver/trainer team, record at this track, new-barn move
+  conn: 3,        // v31 (Marshall): 5 → 3, less weight on driver/trainer team record, record at this track, new-barn move
   offtrack: 6,    // off-track record + sire off-track (only when the track is set to Off)
   beaten: 10,     // (v17: 5 → 10) avg beaten lengths, last 4 real starts (winners count 0)
   odds: 7,        // (v17: 4 → 7) last-start odds — how the bettors rated him last time
