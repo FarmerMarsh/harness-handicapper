@@ -1,5 +1,5 @@
 // Scoring engine — port of engine.py. Points formula + simulation + plays + pros/cons.
-import { fmtTime } from './parse.js?v=32';
+import { fmtTime } from './parse.js?v=33';
 
 // seconds slower than a mile track; quarters get 1/4 of this
 const TRACK_OFFSET = { 1: 0.0, 0.875: 0.4, 0.625: 1.0, 0.5: 2.0 };
@@ -45,13 +45,14 @@ export const SIZE_LABEL = { 0.5: 'half-mile', 0.625: '⅝-mile', 0.875: '⅞-mil
 // trotters: break more (penalty already harsher), outside posts worse, closing/form/class/post count a little more
 // v25 (Marshall): trotters should count their opening ¼ more, pacers their closing ¼ more — flipped early up for
 // trotters (was 0.85, under-weighted) and added a matching closing bump for pacers (had none before). Dialed
-// back from the initial 1.25× to 1.1× for both (Marshall, same day).
-// v29 (Marshall): the OTHER quarter should matter a little more too, for each gait's own natural strength — trotters'
-// closing ¼ bumped from 1.1× (where it sat bundled with form/class/post) to its own 1.15×; pacers' opening ¼, which
-// had no gait-specific boost at all before this, gets the same new 1.15×. Pure scoring-weight change, not a Pro/Con
-// display-tier change — the con side (a slow quarter for that gait) is weighted by the same number, same as every
-// other gait/size/track multiplier in this file; nothing here treats pro and con asymmetrically.
-export const GAIT_MULT = { TROT: { early: 1.1, pace: 0.85, close: 1.15, late: 1.1, form: 1.1, class: 1.1, post: 1.1 }, PACE: { close: 1.1, early: 1.15 } };
+// back from the initial 1.25× to 1.1× for both (Marshall, same day) — this is the v26 state.
+// v30 (Marshall): added a boost on each gait's OTHER quarter too — trotters' closing ¼ pulled out of the 1.1×
+// form/class/post bundle into its own 1.15×, and pacers' opening ¼ (previously no gait-specific boost at all)
+// got the same new 1.15×.
+// v33 (Marshall): rolled v30's two additions back out, explicitly to the v26 state above — trotters' closing ¼
+// is back in the plain 1.1× bundle, pacers get no opening-¼ boost at all. v25/v26's original flip (trotters'
+// opening ¼, pacers' closing ¼, both at 1.1×) stays as-is; only the v30 add-ons were undone.
+export const GAIT_MULT = { TROT: { early: 1.1, pace: 0.85, close: 1.1, late: 1.1, form: 1.1, class: 1.1, post: 1.1 }, PACE: { close: 1.1 } };
 // a track that plays faster or fairer than its size
 export const PLAYS_MULT = {
   speed: { early: 1.25, pace: 1.25, close: 0.85, late: 0.85 },
